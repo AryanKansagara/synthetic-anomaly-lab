@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "synthetic-anomaly-lab"
+version = "0.1.0"
+description = "Leakage-safe anomaly baseline for synthetic transaction events"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{name = "Aryan Kansagara"}]
+
+[project.scripts]
+synthetic-anomaly-demo = "synthetic_anomaly_lab.pipeline:main"
+
+[tool.setuptools.packages.find]
+include = ["synthetic_anomaly_lab*"]
