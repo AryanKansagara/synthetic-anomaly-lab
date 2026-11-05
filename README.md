@@ -8,7 +8,7 @@ This independent portfolio project is not affiliated with Wealthsimple or any fi
 
 - generates deterministic labeled events with amount, account-age, and one-hour velocity features;
 - uses a chronological 70/30 split so future observations never train the past;
-- fits log transforms, robust centers, scales, and a score threshold on the training partition only;
+- fits log transforms, median centers, standard-deviation scales, and a score threshold on the training partition only;
 - reports holdout precision, recall, F1, and amount-feature population stability index (PSI);
 - provides unit coverage for reproducibility, leakage boundaries, model utility, drift, and validation;
 - runs dependency-free on Python 3.11+ with no dataset download or network call.
