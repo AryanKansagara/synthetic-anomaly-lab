@@ -107,6 +107,18 @@ class ThresholdSelection:
     strategy: str
 
 
+@dataclass(frozen=True, slots=True)
+class SegmentEvaluation:
+    """Evaluation for one bounded account-age cohort."""
+
+    segment: str
+    support: int
+    positive_labels: int
+    predicted_positives: int
+    limited_support: bool
+    evaluation: Evaluation
+
+
 def generate_events(count: int, *, seed: int = 7) -> list[Event]:
     """Generate deterministic labeled data; no external or personal data is used."""
     if count < 20:
@@ -261,6 +273,47 @@ def evaluate(model: AnomalyModel, events: Iterable[Event]) -> Evaluation:
     return Evaluation(tp, fp, fn, tn)
 
 
+def account_age_segment_diagnostics(
+    model: AnomalyModel, events: Iterable[Event], *, minimum_support: int = 50
+) -> list[SegmentEvaluation]:
+    """Report model behavior for three fixed, mutually exclusive age cohorts.
+
+    Cohorts are deliberately bounded and include support counts. They are descriptive
+    diagnostics, not fairness evidence or a policy/authorization recommendation.
+    """
+    if not 1 <= minimum_support <= 10_000:
+        raise ValueError("minimum_support must be in [1, 10000]")
+    cohorts: dict[str, list[Event]] = {
+        "new_0_30_days": [],
+        "growing_31_365_days": [],
+        "established_366_plus_days": [],
+    }
+    for event in events:
+        event.features()
+        if event.account_age_days <= 30:
+            cohorts["new_0_30_days"].append(event)
+        elif event.account_age_days <= 365:
+            cohorts["growing_31_365_days"].append(event)
+        else:
+            cohorts["established_366_plus_days"].append(event)
+
+    results: list[SegmentEvaluation] = []
+    for segment, cohort in cohorts.items():
+        evaluation = evaluate(model, cohort)
+        results.append(
+            SegmentEvaluation(
+                segment=segment,
+                support=len(cohort),
+                positive_labels=sum(event.is_anomaly for event in cohort),
+                predicted_positives=evaluation.true_positives
+                + evaluation.false_positives,
+                limited_support=len(cohort) < minimum_support,
+                evaluation=evaluation,
+            )
+        )
+    return results
+
+
 def population_stability_index(
     baseline: Sequence[float], current: Sequence[float], *, bins: int = 10
 ) -> float:
@@ -355,6 +408,7 @@ def run(count: int, seed: int) -> dict[str, object]:
         [event.features()[0] for event in test],
     )
     backtest = rolling_backtest(events)
+    segment_diagnostics = account_age_segment_diagnostics(model, test)
     return {
         "data": "synthetic-only",
         "seed": seed,
@@ -385,6 +439,19 @@ def run(count: int, seed: int) -> dict[str, object]:
                 "f1": round(historical_metrics.f1, 6),
             },
         ],
+        "account_age_segment_diagnostics": [
+            {
+                "segment": diagnostic.segment,
+                "support": diagnostic.support,
+                "positive_labels": diagnostic.positive_labels,
+                "predicted_positives": diagnostic.predicted_positives,
+                "limited_support": diagnostic.limited_support,
+                "precision": round(diagnostic.evaluation.precision, 6),
+                "recall": round(diagnostic.evaluation.recall, 6),
+                "f1": round(diagnostic.evaluation.f1, 6),
+            }
+            for diagnostic in segment_diagnostics
+        ],
         "rolling_backtest": [
             {
                 "train_start": fold.train_start,
@@ -406,6 +473,7 @@ def run(count: int, seed: int) -> dict[str, object]:
             "labels and events are generated, not representative of real customers",
             "scores require human and domain validation before any operational use",
             "historical-label threshold selection optimizes synthetic F1, not real-world cost",
+            "account-age cohorts are descriptive diagnostics, not fairness or policy evidence",
         ],
     }
 
