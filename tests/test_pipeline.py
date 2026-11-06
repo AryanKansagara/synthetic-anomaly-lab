@@ -7,6 +7,7 @@ from synthetic_anomaly_lab.pipeline import (
     chronological_split,
     evaluate,
     fit,
+    fit_historical_threshold,
     generate_events,
     population_stability_index,
     rolling_backtest,
@@ -45,6 +46,43 @@ class PipelineTests(unittest.TestCase):
         self.assertGreaterEqual(metrics.precision, 0.70)
         self.assertGreaterEqual(metrics.recall, 0.70)
         self.assertGreaterEqual(metrics.f1, 0.70)
+
+    def test_historical_threshold_uses_only_past_calibration_labels(self) -> None:
+        train, future = chronological_split(generate_events(2_000, seed=7))
+        selection = fit_historical_threshold(train)
+        mutated_future = [
+            dataclasses.replace(event, is_anomaly=not event.is_anomaly)
+            for event in future
+        ]
+        self.assertEqual(selection, fit_historical_threshold(train))
+        self.assertNotEqual(
+            evaluate(selection.model, future),
+            evaluate(selection.model, mutated_future),
+        )
+        self.assertLess(selection.calibration_end, future[0].occurred_at)
+        self.assertEqual(selection.fit_events + selection.calibration_events, len(train))
+        self.assertEqual(selection.strategy, "historical_label_f1")
+        labels_removed_from_calibration = [
+            dataclasses.replace(event, is_anomaly=False)
+            if event.occurred_at >= selection.calibration_start
+            else event
+            for event in train
+        ]
+        self.assertEqual(
+            fit_historical_threshold(labels_removed_from_calibration).strategy,
+            "unsupervised_quantile_fallback_no_positive_labels",
+        )
+
+    def test_historical_threshold_falls_back_without_calibration_positives(self) -> None:
+        events = [
+            dataclasses.replace(event, is_anomaly=False)
+            for event in generate_events(100, seed=3)
+        ]
+        selection = fit_historical_threshold(events)
+        self.assertEqual(
+            selection.strategy, "unsupervised_quantile_fallback_no_positive_labels"
+        )
+        self.assertEqual(selection.calibration_evaluation.true_positives, 0)
 
     def test_population_stability_index(self) -> None:
         baseline = [float(value) for value in range(100)]
@@ -97,6 +135,10 @@ class PipelineTests(unittest.TestCase):
             rolling_backtest(generate_events(20))
         with self.assertRaisesRegex(ValueError, "folds"):
             rolling_backtest(generate_events(100), folds=1)
+        with self.assertRaisesRegex(ValueError, "at least 20 historical"):
+            fit_historical_threshold(generate_events(20)[:19])
+        with self.assertRaisesRegex(ValueError, "calibration_fraction"):
+            fit_historical_threshold(generate_events(100), calibration_fraction=0.5)
 
     def test_report_is_bounded_and_explains_limitations(self) -> None:
         report = run(500, 9)
@@ -111,7 +153,7 @@ class PipelineTests(unittest.TestCase):
         assert isinstance(limitations, list)
         assert isinstance(precision, float)
         assert isinstance(recall, float)
-        self.assertEqual(len(limitations), 3)
+        self.assertEqual(len(limitations), 4)
         self.assertTrue(0.0 <= precision <= 1.0)
         self.assertTrue(0.0 <= recall <= 1.0)
         backtest = report["rolling_backtest"]
@@ -122,6 +164,11 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(
             all(fold["train_end"] < fold["test_start"] for fold in backtest)
         )
+        comparison = report["threshold_comparison"]
+        self.assertIsInstance(comparison, list)
+        assert isinstance(comparison, list)
+        self.assertEqual(len(comparison), 2)
+        self.assertLess(comparison[1]["calibration_end"], backtest[-1]["test_end"])
 
 
 if __name__ == "__main__":

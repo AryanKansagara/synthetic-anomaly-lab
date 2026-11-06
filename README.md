@@ -10,6 +10,8 @@ This independent portfolio project is not affiliated with Wealthsimple or any fi
 - uses a chronological 70/30 split so future observations never train the past;
 - fits log transforms, median centers, standard-deviation scales, and a score threshold on the training partition only;
 - reports holdout precision, recall, F1, and amount-feature population stability index (PSI);
+- compares the training-quantile threshold with an F1-selected threshold whose
+  labels come only from a chronological historical calibration window;
 - runs four expanding-window temporal backtests, refitting on past-only history before
   each untouched future window and reporting per-window metrics and PSI;
 - provides unit coverage for reproducibility, leakage boundaries, model utility, drift, and validation;
@@ -26,6 +28,6 @@ Example output is JSON and explicitly marks the data as `synthetic-only`. Exact 
 
 ## Design boundaries
 
-This is an educational statistical baseline, not a production fraud decision system. Synthetic labels are intentionally obvious and are not evidence of performance on real customers. The model has no identity, authorization, case-management, feedback, fairness, calibration, explainability, or human-review workflow. PSI indicates distribution change; it does not explain the cause or determine whether a model remains safe. A production system would require representative consented data, domain-specific cost analysis, privacy/security review, monitored deployment, governance, and human escalation.
+This is an educational statistical baseline, not a production fraud decision system. Synthetic labels are intentionally obvious and are not evidence of performance on real customers. The model has no identity, authorization, case-management, feedback, fairness, probability calibration, explainability, or human-review workflow. PSI indicates distribution change; it does not explain the cause or determine whether a model remains safe. A production system would require representative consented data, domain-specific cost analysis, privacy/security review, monitored deployment, governance, and human escalation.
 
-The standard-deviation scale is learned from contaminated training data, and the quantile threshold assumes a configured normal fraction. Rolling folds are not independent because their training histories overlap, and good synthetic backtest metrics do not establish production performance. Later slices can compare robust scaling and supervised baselines, add threshold/calibration comparisons, and report segment-level behavior without weakening the chronological boundary.
+The standard-deviation scale is learned from contaminated training data, and the quantile threshold assumes a configured normal fraction. The historical-label strategy maximizes F1 on generated labels; it is not probability calibration and does not encode real investigation costs. It falls back to the unsupervised quantile when its calibration window has no positive label. Rolling folds are not independent because their training histories overlap, and good synthetic backtest metrics do not establish production performance. Later slices can compare robust scaling and supervised baselines or report segment-level behavior without weakening the chronological boundary.
