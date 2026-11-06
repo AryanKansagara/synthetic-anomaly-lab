@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import dataclasses
 import json
 import math
 import random
@@ -93,6 +94,19 @@ class BacktestFold:
     amount_psi: float
 
 
+@dataclass(frozen=True, slots=True)
+class ThresholdSelection:
+    """A model whose threshold was selected on a past-only labeled window."""
+
+    model: AnomalyModel
+    fit_events: int
+    calibration_events: int
+    calibration_start: int
+    calibration_end: int
+    calibration_evaluation: Evaluation
+    strategy: str
+
+
 def generate_events(count: int, *, seed: int = 7) -> list[Event]:
     """Generate deterministic labeled data; no external or personal data is used."""
     if count < 20:
@@ -164,6 +178,72 @@ def fit(events: Sequence[Event], *, expected_normal_fraction: float = 0.94) -> A
         [provisional.score(event) for event in events], expected_normal_fraction
     )
     return AnomalyModel(centers=centers, scales=scales, threshold=threshold)
+
+
+def fit_historical_threshold(
+    events: Sequence[Event], *, calibration_fraction: float = 0.2
+) -> ThresholdSelection:
+    """Select a score threshold with labels from a past-only calibration window.
+
+    Centers and scales are fitted on the earlier prefix. Candidate thresholds are
+    scored on the later calibration suffix, with deterministic tie-breaking. If
+    that suffix has no positive labels, selection falls back to the unsupervised
+    training quantile rather than claiming that supervised calibration occurred.
+    """
+    if len(events) < 20:
+        raise ValueError("at least 20 historical events are required")
+    if not 0.1 <= calibration_fraction <= 0.4:
+        raise ValueError("calibration_fraction must be in [0.1, 0.4]")
+    ordered = sorted(events, key=lambda event: event.occurred_at)
+    if any(
+        left.occurred_at == right.occurred_at
+        for left, right in zip(ordered, ordered[1:])
+    ):
+        raise ValueError("occurred_at values must be unique")
+
+    calibration_size = max(2, math.ceil(len(ordered) * calibration_fraction))
+    fit_events = ordered[:-calibration_size]
+    calibration_events = ordered[-calibration_size:]
+    base_model = fit(fit_events)
+    strategy = "historical_label_f1"
+
+    if any(event.is_anomaly for event in calibration_events):
+        scores = sorted({base_model.score(event) for event in calibration_events})
+        candidates = [*scores, math.nextafter(scores[-1], math.inf)]
+        evaluated = [
+            (
+                evaluate(
+                    dataclasses.replace(base_model, threshold=threshold),
+                    calibration_events,
+                ),
+                threshold,
+            )
+            for threshold in candidates
+        ]
+        calibration_evaluation, threshold = max(
+            evaluated,
+            key=lambda item: (
+                item[0].f1,
+                item[0].precision,
+                item[0].recall,
+                item[1],
+            ),
+        )
+        model = dataclasses.replace(base_model, threshold=threshold)
+    else:
+        model = base_model
+        calibration_evaluation = evaluate(model, calibration_events)
+        strategy = "unsupervised_quantile_fallback_no_positive_labels"
+
+    return ThresholdSelection(
+        model=model,
+        fit_events=len(fit_events),
+        calibration_events=len(calibration_events),
+        calibration_start=calibration_events[0].occurred_at,
+        calibration_end=calibration_events[-1].occurred_at,
+        calibration_evaluation=calibration_evaluation,
+        strategy=strategy,
+    )
 
 
 def evaluate(model: AnomalyModel, events: Iterable[Event]) -> Evaluation:
@@ -268,6 +348,8 @@ def run(count: int, seed: int) -> dict[str, object]:
     train, test = chronological_split(events)
     model = fit(train)
     metrics = evaluate(model, test)
+    historical_selection = fit_historical_threshold(train)
+    historical_metrics = evaluate(historical_selection.model, test)
     amount_psi = population_stability_index(
         [event.features()[0] for event in train],
         [event.features()[0] for event in test],
@@ -283,6 +365,26 @@ def run(count: int, seed: int) -> dict[str, object]:
         "recall": round(metrics.recall, 6),
         "f1": round(metrics.f1, 6),
         "amount_psi": round(amount_psi, 6),
+        "threshold_comparison": [
+            {
+                "strategy": "unsupervised_train_quantile",
+                "threshold": round(model.threshold, 6),
+                "precision": round(metrics.precision, 6),
+                "recall": round(metrics.recall, 6),
+                "f1": round(metrics.f1, 6),
+            },
+            {
+                "strategy": historical_selection.strategy,
+                "fit_events": historical_selection.fit_events,
+                "calibration_events": historical_selection.calibration_events,
+                "calibration_start": historical_selection.calibration_start,
+                "calibration_end": historical_selection.calibration_end,
+                "threshold": round(historical_selection.model.threshold, 6),
+                "precision": round(historical_metrics.precision, 6),
+                "recall": round(historical_metrics.recall, 6),
+                "f1": round(historical_metrics.f1, 6),
+            },
+        ],
         "rolling_backtest": [
             {
                 "train_start": fold.train_start,
@@ -303,6 +405,7 @@ def run(count: int, seed: int) -> dict[str, object]:
             "statistical baseline, not a production fraud decision system",
             "labels and events are generated, not representative of real customers",
             "scores require human and domain validation before any operational use",
+            "historical-label threshold selection optimizes synthetic F1, not real-world cost",
         ],
     }
 
