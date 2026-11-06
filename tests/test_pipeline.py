@@ -9,6 +9,7 @@ from synthetic_anomaly_lab.pipeline import (
     fit,
     generate_events,
     population_stability_index,
+    rolling_backtest,
     run,
 )
 
@@ -53,6 +54,31 @@ class PipelineTests(unittest.TestCase):
         shifted = [value + 100.0 for value in baseline]
         self.assertGreater(population_stability_index(baseline, shifted), 1.0)
 
+    def test_rolling_backtest_uses_ordered_non_overlapping_future_windows(self) -> None:
+        events = list(reversed(generate_events(200, seed=13)))
+        folds = rolling_backtest(events)
+        self.assertEqual(len(folds), 4)
+        self.assertEqual([fold.train_events for fold in folds], [100, 125, 150, 175])
+        self.assertEqual([fold.test_events for fold in folds], [25, 25, 25, 25])
+        self.assertTrue(all(fold.train_end < fold.test_start for fold in folds))
+        self.assertTrue(
+            all(left.test_end < right.test_start for left, right in zip(folds, folds[1:]))
+        )
+        self.assertEqual(folds[-1].test_end, max(event.occurred_at for event in events))
+
+    def test_later_future_mutation_cannot_change_earlier_backtest_fold(self) -> None:
+        events = generate_events(200, seed=17)
+        original = rolling_backtest(events)
+        changed = [
+            dataclasses.replace(event, amount_minor=event.amount_minor * 10_000)
+            if index >= 150
+            else event
+            for index, event in enumerate(events)
+        ]
+        mutated = rolling_backtest(changed)
+        self.assertEqual(original[0], mutated[0])
+        self.assertNotEqual(original[-1], mutated[-1])
+
     def test_validation_rejects_unsafe_inputs(self) -> None:
         with self.assertRaisesRegex(ValueError, "at least 20"):
             generate_events(19)
@@ -67,6 +93,10 @@ class PipelineTests(unittest.TestCase):
             population_stability_index(
                 [float(value) for value in range(10)], [math.inf]
             )
+        with self.assertRaisesRegex(ValueError, "at least 40"):
+            rolling_backtest(generate_events(20))
+        with self.assertRaisesRegex(ValueError, "folds"):
+            rolling_backtest(generate_events(100), folds=1)
 
     def test_report_is_bounded_and_explains_limitations(self) -> None:
         report = run(500, 9)
@@ -84,6 +114,14 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(limitations), 3)
         self.assertTrue(0.0 <= precision <= 1.0)
         self.assertTrue(0.0 <= recall <= 1.0)
+        backtest = report["rolling_backtest"]
+        self.assertIsInstance(backtest, list)
+        assert isinstance(backtest, list)
+        self.assertEqual(len(backtest), 4)
+        self.assertEqual(sum(fold["test_events"] for fold in backtest), 250)
+        self.assertTrue(
+            all(fold["train_end"] < fold["test_start"] for fold in backtest)
+        )
 
 
 if __name__ == "__main__":

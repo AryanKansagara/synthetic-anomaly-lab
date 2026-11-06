@@ -78,6 +78,21 @@ class Evaluation:
         return 2 * self.precision * self.recall / denominator if denominator else 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class BacktestFold:
+    """One expanding-window evaluation with an untouched future test window."""
+
+    train_start: int
+    train_end: int
+    test_start: int
+    test_end: int
+    train_events: int
+    test_events: int
+    threshold: float
+    evaluation: Evaluation
+    amount_psi: float
+
+
 def generate_events(count: int, *, seed: int = 7) -> list[Event]:
     """Generate deterministic labeled data; no external or personal data is used."""
     if count < 20:
@@ -196,14 +211,68 @@ def population_stability_index(
     return psi
 
 
+def rolling_backtest(
+    events: Sequence[Event], *, folds: int = 4, initial_train_fraction: float = 0.5
+) -> list[BacktestFold]:
+    """Run expanding-window folds; each model sees only events before its test window."""
+    if not 2 <= folds <= 10:
+        raise ValueError("folds must be in [2, 10]")
+    if not 0.4 <= initial_train_fraction <= 0.8:
+        raise ValueError("initial_train_fraction must be in [0.4, 0.8]")
+    if len(events) < 40:
+        raise ValueError("at least 40 events are required")
+
+    ordered = sorted(events, key=lambda event: event.occurred_at)
+    if any(
+        left.occurred_at == right.occurred_at
+        for left, right in zip(ordered, ordered[1:])
+    ):
+        raise ValueError("occurred_at values must be unique")
+
+    initial_train_size = int(len(ordered) * initial_train_fraction)
+    remaining = len(ordered) - initial_train_size
+    if remaining < folds:
+        raise ValueError("not enough test events for the requested folds")
+    base_test_size, extra = divmod(remaining, folds)
+
+    results: list[BacktestFold] = []
+    test_start_index = initial_train_size
+    for fold_index in range(folds):
+        test_size = base_test_size + (1 if fold_index < extra else 0)
+        test_end_index = test_start_index + test_size
+        train = ordered[:test_start_index]
+        test = ordered[test_start_index:test_end_index]
+        model = fit(train)
+        results.append(
+            BacktestFold(
+                train_start=train[0].occurred_at,
+                train_end=train[-1].occurred_at,
+                test_start=test[0].occurred_at,
+                test_end=test[-1].occurred_at,
+                train_events=len(train),
+                test_events=len(test),
+                threshold=model.threshold,
+                evaluation=evaluate(model, test),
+                amount_psi=population_stability_index(
+                    [event.features()[0] for event in train],
+                    [event.features()[0] for event in test],
+                ),
+            )
+        )
+        test_start_index = test_end_index
+    return results
+
+
 def run(count: int, seed: int) -> dict[str, object]:
-    train, test = chronological_split(generate_events(count, seed=seed))
+    events = generate_events(count, seed=seed)
+    train, test = chronological_split(events)
     model = fit(train)
     metrics = evaluate(model, test)
     amount_psi = population_stability_index(
         [event.features()[0] for event in train],
         [event.features()[0] for event in test],
     )
+    backtest = rolling_backtest(events)
     return {
         "data": "synthetic-only",
         "seed": seed,
@@ -214,6 +283,22 @@ def run(count: int, seed: int) -> dict[str, object]:
         "recall": round(metrics.recall, 6),
         "f1": round(metrics.f1, 6),
         "amount_psi": round(amount_psi, 6),
+        "rolling_backtest": [
+            {
+                "train_start": fold.train_start,
+                "train_end": fold.train_end,
+                "test_start": fold.test_start,
+                "test_end": fold.test_end,
+                "train_events": fold.train_events,
+                "test_events": fold.test_events,
+                "threshold": round(fold.threshold, 6),
+                "precision": round(fold.evaluation.precision, 6),
+                "recall": round(fold.evaluation.recall, 6),
+                "f1": round(fold.evaluation.f1, 6),
+                "amount_psi": round(fold.amount_psi, 6),
+            }
+            for fold in backtest
+        ],
         "limitations": [
             "statistical baseline, not a production fraud decision system",
             "labels and events are generated, not representative of real customers",
