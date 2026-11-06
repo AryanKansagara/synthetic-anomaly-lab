@@ -4,6 +4,7 @@ import unittest
 
 from synthetic_anomaly_lab.pipeline import (
     Event,
+    account_age_segment_diagnostics,
     chronological_split,
     evaluate,
     fit,
@@ -92,6 +93,39 @@ class PipelineTests(unittest.TestCase):
         shifted = [value + 100.0 for value in baseline]
         self.assertGreater(population_stability_index(baseline, shifted), 1.0)
 
+    def test_segment_diagnostics_are_bounded_complete_and_support_aware(self) -> None:
+        train, test = chronological_split(generate_events(2_000, seed=7))
+        model = fit(train)
+        overall = evaluate(model, test)
+        diagnostics = account_age_segment_diagnostics(model, test)
+
+        self.assertEqual(
+            [diagnostic.segment for diagnostic in diagnostics],
+            [
+                "new_0_30_days",
+                "growing_31_365_days",
+                "established_366_plus_days",
+            ],
+        )
+        self.assertEqual(sum(item.support for item in diagnostics), len(test))
+        self.assertEqual(
+            sum(item.evaluation.true_positives for item in diagnostics),
+            overall.true_positives,
+        )
+        self.assertEqual(
+            sum(item.evaluation.false_positives for item in diagnostics),
+            overall.false_positives,
+        )
+        self.assertTrue(any(item.limited_support for item in diagnostics))
+        self.assertTrue(any(not item.limited_support for item in diagnostics))
+
+    def test_segment_diagnostics_reject_invalid_support_and_events(self) -> None:
+        model = fit(generate_events(100))
+        with self.assertRaisesRegex(ValueError, "minimum_support"):
+            account_age_segment_diagnostics(model, [], minimum_support=0)
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            account_age_segment_diagnostics(model, [Event(1, 1, -1, 1, False)])
+
     def test_rolling_backtest_uses_ordered_non_overlapping_future_windows(self) -> None:
         events = list(reversed(generate_events(200, seed=13)))
         folds = rolling_backtest(events)
@@ -153,7 +187,7 @@ class PipelineTests(unittest.TestCase):
         assert isinstance(limitations, list)
         assert isinstance(precision, float)
         assert isinstance(recall, float)
-        self.assertEqual(len(limitations), 4)
+        self.assertEqual(len(limitations), 5)
         self.assertTrue(0.0 <= precision <= 1.0)
         self.assertTrue(0.0 <= recall <= 1.0)
         backtest = report["rolling_backtest"]
@@ -169,6 +203,12 @@ class PipelineTests(unittest.TestCase):
         assert isinstance(comparison, list)
         self.assertEqual(len(comparison), 2)
         self.assertLess(comparison[1]["calibration_end"], backtest[-1]["test_end"])
+        diagnostics = report["account_age_segment_diagnostics"]
+        self.assertIsInstance(diagnostics, list)
+        assert isinstance(diagnostics, list)
+        self.assertEqual(len(diagnostics), 3)
+        self.assertEqual(sum(item["support"] for item in diagnostics), 150)
+        self.assertTrue(all("limited_support" in item for item in diagnostics))
 
 
 if __name__ == "__main__":
