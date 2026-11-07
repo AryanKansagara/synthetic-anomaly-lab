@@ -11,6 +11,9 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 
+FEATURE_NAMES = ("log_amount_minor", "log_account_age_days", "log_velocity_1h")
+
+
 @dataclass(frozen=True, slots=True)
 class Event:
     """One synthetic transaction-like event in event-time order."""
@@ -38,19 +41,69 @@ class Event:
 
 
 @dataclass(frozen=True, slots=True)
+class FeatureContribution:
+    """One feature's exact non-negative contribution to an anomaly score."""
+
+    feature: str
+    transformed_value: float
+    center: float
+    scale: float
+    standardized_deviation: float
+    contribution: float
+
+
+@dataclass(frozen=True, slots=True)
+class ScoreExplanation:
+    """An additive decomposition of this baseline's squared-distance score."""
+
+    score: float
+    threshold: float
+    predicted_anomaly: bool
+    contributions: tuple[FeatureContribution, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class AnomalyModel:
     centers: tuple[float, ...]
     scales: tuple[float, ...]
     threshold: float
 
-    def score(self, event: Event) -> float:
+    def explain(self, event: Event) -> ScoreExplanation:
         values = event.features()
-        if len(values) != len(self.centers):
+        if not (
+            len(values) == len(FEATURE_NAMES) == len(self.centers) == len(self.scales)
+        ):
             raise ValueError("feature count does not match model")
-        return sum(
-            ((value - center) / scale) ** 2
-            for value, center, scale in zip(values, self.centers, self.scales)
-        ) / len(values)
+        if any(not math.isfinite(scale) or scale <= 0 for scale in self.scales):
+            raise ValueError("model scales must be positive and finite")
+        contributions = tuple(
+            FeatureContribution(
+                feature=name,
+                transformed_value=value,
+                center=center,
+                scale=scale,
+                standardized_deviation=(value - center) / scale,
+                contribution=((value - center) / scale) ** 2 / len(values),
+            )
+            for name, value, center, scale in zip(
+                FEATURE_NAMES, values, self.centers, self.scales
+            )
+        )
+        score = sum(item.contribution for item in contributions)
+        return ScoreExplanation(
+            score=score,
+            threshold=self.threshold,
+            predicted_anomaly=score >= self.threshold,
+            contributions=tuple(
+                sorted(
+                    contributions,
+                    key=lambda item: (-item.contribution, item.feature),
+                )
+            ),
+        )
+
+    def score(self, event: Event) -> float:
+        return self.explain(event).score
 
     def predict(self, event: Event) -> bool:
         return self.score(event) >= self.threshold
@@ -433,6 +486,8 @@ def run(count: int, seed: int) -> dict[str, object]:
     )
     backtest = rolling_backtest(events)
     segment_diagnostics = account_age_segment_diagnostics(model, test)
+    example_event = max(test, key=model.score)
+    example_explanation = model.explain(example_event)
     return {
         "data": "synthetic-only",
         "seed": seed,
@@ -443,6 +498,25 @@ def run(count: int, seed: int) -> dict[str, object]:
         "recall": round(metrics.recall, 6),
         "f1": round(metrics.f1, 6),
         "amount_psi": round(amount_psi, 6),
+        "highest_score_explanation": {
+            "occurred_at": example_event.occurred_at,
+            "score": round(example_explanation.score, 6),
+            "threshold": round(example_explanation.threshold, 6),
+            "predicted_anomaly": example_explanation.predicted_anomaly,
+            "feature_contributions": [
+                {
+                    "feature": item.feature,
+                    "transformed_value": round(item.transformed_value, 6),
+                    "training_center": round(item.center, 6),
+                    "training_scale": round(item.scale, 6),
+                    "standardized_deviation": round(
+                        item.standardized_deviation, 6
+                    ),
+                    "score_contribution": round(item.contribution, 6),
+                }
+                for item in example_explanation.contributions
+            ],
+        },
         "scaling_comparison": [
             {
                 "strategy": "standard_deviation",
@@ -515,6 +589,7 @@ def run(count: int, seed: int) -> dict[str, object]:
             "historical-label threshold selection optimizes synthetic F1, not real-world cost",
             "account-age cohorts are descriptive diagnostics, not fairness or policy evidence",
             "scaling comparisons use synthetic labels and do not establish production robustness",
+            "score contributions are mathematical decompositions, not causal explanations",
         ],
     }
 
