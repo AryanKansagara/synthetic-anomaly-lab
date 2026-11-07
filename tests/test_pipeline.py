@@ -48,6 +48,35 @@ class PipelineTests(unittest.TestCase):
         self.assertGreaterEqual(metrics.recall, 0.70)
         self.assertGreaterEqual(metrics.f1, 0.70)
 
+    def test_robust_scaling_is_train_only_and_less_outlier_sensitive(self) -> None:
+        train, future = chronological_split(generate_events(500, seed=7))
+        standard = fit(train, scaling="standard_deviation")
+        robust = fit(train, scaling="robust_mad")
+        changed_future = [
+            dataclasses.replace(event, amount_minor=event.amount_minor * 1_000_000)
+            for event in future
+        ]
+
+        self.assertEqual(robust, fit(train, scaling="robust_mad"))
+        self.assertEqual(robust.centers, standard.centers)
+        self.assertNotEqual(robust.scales, standard.scales)
+        self.assertNotEqual(evaluate(robust, future), evaluate(robust, changed_future))
+
+        contaminated = [
+            *train,
+            dataclasses.replace(
+                train[-1],
+                occurred_at=train[-1].occurred_at + 1,
+                amount_minor=10**18,
+            ),
+        ]
+        contaminated_standard = fit(contaminated, scaling="standard_deviation")
+        contaminated_robust = fit(contaminated, scaling="robust_mad")
+        self.assertGreater(
+            contaminated_standard.scales[0] / standard.scales[0],
+            contaminated_robust.scales[0] / robust.scales[0],
+        )
+
     def test_historical_threshold_uses_only_past_calibration_labels(self) -> None:
         train, future = chronological_split(generate_events(2_000, seed=7))
         selection = fit_historical_threshold(train)
@@ -173,6 +202,8 @@ class PipelineTests(unittest.TestCase):
             fit_historical_threshold(generate_events(20)[:19])
         with self.assertRaisesRegex(ValueError, "calibration_fraction"):
             fit_historical_threshold(generate_events(100), calibration_fraction=0.5)
+        with self.assertRaisesRegex(ValueError, "scaling"):
+            fit(generate_events(100), scaling="future_normalizer")
 
     def test_report_is_bounded_and_explains_limitations(self) -> None:
         report = run(500, 9)
@@ -187,7 +218,7 @@ class PipelineTests(unittest.TestCase):
         assert isinstance(limitations, list)
         assert isinstance(precision, float)
         assert isinstance(recall, float)
-        self.assertEqual(len(limitations), 5)
+        self.assertEqual(len(limitations), 6)
         self.assertTrue(0.0 <= precision <= 1.0)
         self.assertTrue(0.0 <= recall <= 1.0)
         backtest = report["rolling_backtest"]
@@ -209,6 +240,14 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(diagnostics), 3)
         self.assertEqual(sum(item["support"] for item in diagnostics), 150)
         self.assertTrue(all("limited_support" in item for item in diagnostics))
+        scaling = report["scaling_comparison"]
+        self.assertIsInstance(scaling, list)
+        assert isinstance(scaling, list)
+        self.assertEqual(
+            [item["strategy"] for item in scaling],
+            ["standard_deviation", "robust_mad"],
+        )
+        self.assertTrue(all(0.0 <= item["f1"] <= 1.0 for item in scaling))
 
 
 if __name__ == "__main__":
