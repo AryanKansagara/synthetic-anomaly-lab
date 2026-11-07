@@ -175,16 +175,38 @@ def _quantile(values: Sequence[float], fraction: float) -> float:
     return ordered[max(0, min(index, len(ordered) - 1))]
 
 
-def fit(events: Sequence[Event], *, expected_normal_fraction: float = 0.94) -> AnomalyModel:
-    """Fit center, scale and threshold using training events only."""
+def fit(
+    events: Sequence[Event],
+    *,
+    expected_normal_fraction: float = 0.94,
+    scaling: str = "standard_deviation",
+) -> AnomalyModel:
+    """Fit center, scale and threshold using training events only.
+
+    ``robust_mad`` uses the median absolute deviation with the 1.4826 normal-
+    consistency factor for comparability with standard deviation under a normal
+    distribution. Both strategies retain the median center and fit exclusively on
+    the supplied history.
+    """
     if len(events) < 10:
         raise ValueError("at least ten training events are required")
     if not 0.5 <= expected_normal_fraction < 1.0:
         raise ValueError("expected_normal_fraction must be in [0.5, 1.0)")
+    if scaling not in {"standard_deviation", "robust_mad"}:
+        raise ValueError("scaling must be 'standard_deviation' or 'robust_mad'")
     rows = [event.features() for event in events]
     columns = list(zip(*rows))
     centers = tuple(statistics.median(column) for column in columns)
-    scales = tuple(max(statistics.pstdev(column), 1e-9) for column in columns)
+    if scaling == "standard_deviation":
+        scales = tuple(max(statistics.pstdev(column), 1e-9) for column in columns)
+    else:
+        scales = tuple(
+            max(
+                1.4826 * statistics.median(abs(value - center) for value in column),
+                1e-9,
+            )
+            for column, center in zip(columns, centers)
+        )
     provisional = AnomalyModel(centers=centers, scales=scales, threshold=math.inf)
     threshold = _quantile(
         [provisional.score(event) for event in events], expected_normal_fraction
@@ -401,6 +423,8 @@ def run(count: int, seed: int) -> dict[str, object]:
     train, test = chronological_split(events)
     model = fit(train)
     metrics = evaluate(model, test)
+    robust_model = fit(train, scaling="robust_mad")
+    robust_metrics = evaluate(robust_model, test)
     historical_selection = fit_historical_threshold(train)
     historical_metrics = evaluate(historical_selection.model, test)
     amount_psi = population_stability_index(
@@ -419,6 +443,22 @@ def run(count: int, seed: int) -> dict[str, object]:
         "recall": round(metrics.recall, 6),
         "f1": round(metrics.f1, 6),
         "amount_psi": round(amount_psi, 6),
+        "scaling_comparison": [
+            {
+                "strategy": "standard_deviation",
+                "threshold": round(model.threshold, 6),
+                "precision": round(metrics.precision, 6),
+                "recall": round(metrics.recall, 6),
+                "f1": round(metrics.f1, 6),
+            },
+            {
+                "strategy": "robust_mad",
+                "threshold": round(robust_model.threshold, 6),
+                "precision": round(robust_metrics.precision, 6),
+                "recall": round(robust_metrics.recall, 6),
+                "f1": round(robust_metrics.f1, 6),
+            },
+        ],
         "threshold_comparison": [
             {
                 "strategy": "unsupervised_train_quantile",
@@ -474,6 +514,7 @@ def run(count: int, seed: int) -> dict[str, object]:
             "scores require human and domain validation before any operational use",
             "historical-label threshold selection optimizes synthetic F1, not real-world cost",
             "account-age cohorts are descriptive diagnostics, not fairness or policy evidence",
+            "scaling comparisons use synthetic labels and do not establish production robustness",
         ],
     }
 
