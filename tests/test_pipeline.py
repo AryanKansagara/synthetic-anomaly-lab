@@ -3,6 +3,7 @@ import math
 import unittest
 
 from synthetic_anomaly_lab.pipeline import (
+    AnomalyModel,
     Event,
     account_age_segment_diagnostics,
     chronological_split,
@@ -47,6 +48,37 @@ class PipelineTests(unittest.TestCase):
         self.assertGreaterEqual(metrics.precision, 0.70)
         self.assertGreaterEqual(metrics.recall, 0.70)
         self.assertGreaterEqual(metrics.f1, 0.70)
+
+    def test_score_explanation_is_exact_ranked_and_uses_fitted_parameters(self) -> None:
+        train, future = chronological_split(generate_events(500, seed=7))
+        model = fit(train)
+        event = future[0]
+        explanation = model.explain(event)
+
+        self.assertAlmostEqual(
+            sum(item.contribution for item in explanation.contributions),
+            model.score(event),
+        )
+        self.assertEqual(explanation.predicted_anomaly, model.predict(event))
+        self.assertEqual(
+            [item.contribution for item in explanation.contributions],
+            sorted(
+                (item.contribution for item in explanation.contributions), reverse=True
+            ),
+        )
+        self.assertEqual(
+            {item.center for item in explanation.contributions}, set(model.centers)
+        )
+        self.assertEqual(
+            {item.scale for item in explanation.contributions}, set(model.scales)
+        )
+
+    def test_score_explanation_rejects_invalid_model_dimensions_and_scales(self) -> None:
+        event = generate_events(20)[0]
+        with self.assertRaisesRegex(ValueError, "feature count"):
+            AnomalyModel((0.0,), (1.0,), 1.0).explain(event)
+        with self.assertRaisesRegex(ValueError, "positive and finite"):
+            AnomalyModel((0.0, 0.0, 0.0), (1.0, 0.0, 1.0), 1.0).explain(event)
 
     def test_robust_scaling_is_train_only_and_less_outlier_sensitive(self) -> None:
         train, future = chronological_split(generate_events(500, seed=7))
@@ -218,7 +250,7 @@ class PipelineTests(unittest.TestCase):
         assert isinstance(limitations, list)
         assert isinstance(precision, float)
         assert isinstance(recall, float)
-        self.assertEqual(len(limitations), 6)
+        self.assertEqual(len(limitations), 7)
         self.assertTrue(0.0 <= precision <= 1.0)
         self.assertTrue(0.0 <= recall <= 1.0)
         backtest = report["rolling_backtest"]
@@ -248,6 +280,23 @@ class PipelineTests(unittest.TestCase):
             ["standard_deviation", "robust_mad"],
         )
         self.assertTrue(all(0.0 <= item["f1"] <= 1.0 for item in scaling))
+        explanation = report["highest_score_explanation"]
+        self.assertIsInstance(explanation, dict)
+        assert isinstance(explanation, dict)
+        contributions = explanation["feature_contributions"]
+        self.assertIsInstance(contributions, list)
+        assert isinstance(contributions, list)
+        self.assertEqual(len(contributions), 3)
+        self.assertEqual(
+            [item["feature"] for item in contributions],
+            [
+                item["feature"]
+                for item in sorted(
+                    contributions,
+                    key=lambda item: (-item["score_contribution"], item["feature"]),
+                )
+            ],
+        )
 
 
 if __name__ == "__main__":
