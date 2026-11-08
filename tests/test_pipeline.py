@@ -4,6 +4,7 @@ import unittest
 
 from synthetic_anomaly_lab.pipeline import (
     AnomalyModel,
+    DriftWindow,
     Event,
     account_age_segment_diagnostics,
     chronological_split,
@@ -14,6 +15,7 @@ from synthetic_anomaly_lab.pipeline import (
     population_stability_index,
     rolling_backtest,
     run,
+    simulate_drift_policy,
 )
 
 
@@ -212,6 +214,41 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(original[0], mutated[0])
         self.assertNotEqual(original[-1], mutated[-1])
 
+    def test_drift_policy_requires_supported_consecutive_critical_windows(self) -> None:
+        decisions = simulate_drift_policy(
+            [
+                DriftWindow(1, 2, 0.05, 100),
+                DriftWindow(3, 4, 0.30, 100),
+                DriftWindow(5, 6, 0.40, 100),
+                DriftWindow(7, 8, 0.90, 10),
+                DriftWindow(9, 10, 0.15, 100),
+            ]
+        )
+        self.assertEqual(
+            [decision.candidate_response for decision in decisions],
+            [
+                "monitor",
+                "investigate",
+                "candidate_pause_and_human_review",
+                "collect_more_evidence",
+                "investigate",
+            ],
+        )
+        self.assertEqual(
+            [decision.consecutive_critical_windows for decision in decisions],
+            [0, 1, 2, 0, 0],
+        )
+
+    def test_drift_policy_validates_configuration_and_windows(self) -> None:
+        with self.assertRaisesRegex(ValueError, "warning < critical"):
+            simulate_drift_policy([], warning_psi=0.25, critical_psi=0.25)
+        with self.assertRaisesRegex(ValueError, "strictly ordered"):
+            simulate_drift_policy(
+                [DriftWindow(1, 3, 0.0, 50), DriftWindow(3, 4, 0.0, 50)]
+            )
+        with self.assertRaisesRegex(ValueError, "finite and non-negative"):
+            simulate_drift_policy([DriftWindow(1, 2, math.inf, 50)])
+
     def test_validation_rejects_unsafe_inputs(self) -> None:
         with self.assertRaisesRegex(ValueError, "at least 20"):
             generate_events(19)
@@ -250,7 +287,7 @@ class PipelineTests(unittest.TestCase):
         assert isinstance(limitations, list)
         assert isinstance(precision, float)
         assert isinstance(recall, float)
-        self.assertEqual(len(limitations), 7)
+        self.assertEqual(len(limitations), 8)
         self.assertTrue(0.0 <= precision <= 1.0)
         self.assertTrue(0.0 <= recall <= 1.0)
         backtest = report["rolling_backtest"]
@@ -296,6 +333,17 @@ class PipelineTests(unittest.TestCase):
                     key=lambda item: (-item["score_contribution"], item["feature"]),
                 )
             ],
+        )
+        policy = report["drift_policy_simulation"]
+        self.assertIsInstance(policy, dict)
+        assert isinstance(policy, dict)
+        self.assertFalse(policy["executes_actions"])
+        decisions = policy["decisions"]
+        self.assertIsInstance(decisions, list)
+        assert isinstance(decisions, list)
+        self.assertEqual(len(decisions), 4)
+        self.assertTrue(
+            all(item["window_start"] < item["window_end"] for item in decisions)
         )
 
 
