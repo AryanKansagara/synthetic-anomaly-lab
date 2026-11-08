@@ -172,6 +172,29 @@ class SegmentEvaluation:
     evaluation: Evaluation
 
 
+@dataclass(frozen=True, slots=True)
+class DriftWindow:
+    """One ordered synthetic monitoring window for policy simulation."""
+
+    start: int
+    end: int
+    amount_psi: float
+    support: int
+
+
+@dataclass(frozen=True, slots=True)
+class DriftPolicyDecision:
+    """A simulated candidate response; it never changes model or transaction state."""
+
+    window_start: int
+    window_end: int
+    amount_psi: float
+    support: int
+    consecutive_critical_windows: int
+    candidate_response: str
+    reason: str
+
+
 def generate_events(count: int, *, seed: int = 7) -> list[Event]:
     """Generate deterministic labeled data; no external or personal data is used."""
     if count < 20:
@@ -419,6 +442,83 @@ def population_stability_index(
     return psi
 
 
+def simulate_drift_policy(
+    windows: Iterable[DriftWindow],
+    *,
+    warning_psi: float = 0.1,
+    critical_psi: float = 0.25,
+    minimum_support: int = 50,
+    critical_windows_required: int = 2,
+) -> list[DriftPolicyDecision]:
+    """Simulate bounded responses to amount PSI without taking operational action.
+
+    A critical candidate response requires consecutive sufficiently supported critical
+    windows. Warning, healthy, and under-supported windows reset that streak. The
+    output is a deterministic review aid, not evidence of model safety or a control
+    that should be connected to financial decisions.
+    """
+    if not (
+        math.isfinite(warning_psi)
+        and math.isfinite(critical_psi)
+        and 0.0 <= warning_psi < critical_psi
+    ):
+        raise ValueError(
+            "PSI thresholds must be finite and satisfy 0 <= warning < critical"
+        )
+    if not 1 <= minimum_support <= 1_000_000:
+        raise ValueError("minimum_support must be in [1, 1000000]")
+    if not 1 <= critical_windows_required <= 10:
+        raise ValueError("critical_windows_required must be in [1, 10]")
+
+    decisions: list[DriftPolicyDecision] = []
+    critical_streak = 0
+    previous_end: int | None = None
+    for window in windows:
+        if window.start < 0 or window.end <= window.start:
+            raise ValueError("window bounds must be non-negative with end after start")
+        if previous_end is not None and window.start <= previous_end:
+            raise ValueError("windows must be strictly ordered and non-overlapping")
+        if not math.isfinite(window.amount_psi) or window.amount_psi < 0:
+            raise ValueError("amount_psi must be finite and non-negative")
+        if window.support < 0:
+            raise ValueError("support must be non-negative")
+
+        if window.support < minimum_support:
+            critical_streak = 0
+            response = "collect_more_evidence"
+            reason = "insufficient_support"
+        elif window.amount_psi >= critical_psi:
+            critical_streak += 1
+            if critical_streak >= critical_windows_required:
+                response = "candidate_pause_and_human_review"
+                reason = "sustained_critical_amount_psi"
+            else:
+                response = "investigate"
+                reason = "first_critical_amount_psi"
+        elif window.amount_psi >= warning_psi:
+            critical_streak = 0
+            response = "investigate"
+            reason = "warning_amount_psi"
+        else:
+            critical_streak = 0
+            response = "monitor"
+            reason = "below_warning_amount_psi"
+
+        decisions.append(
+            DriftPolicyDecision(
+                window_start=window.start,
+                window_end=window.end,
+                amount_psi=window.amount_psi,
+                support=window.support,
+                consecutive_critical_windows=critical_streak,
+                candidate_response=response,
+                reason=reason,
+            )
+        )
+        previous_end = window.end
+    return decisions
+
+
 def rolling_backtest(
     events: Sequence[Event], *, folds: int = 4, initial_train_fraction: float = 0.5
 ) -> list[BacktestFold]:
@@ -485,6 +585,15 @@ def run(count: int, seed: int) -> dict[str, object]:
         [event.features()[0] for event in test],
     )
     backtest = rolling_backtest(events)
+    drift_policy = simulate_drift_policy(
+        DriftWindow(
+            start=fold.test_start,
+            end=fold.test_end,
+            amount_psi=fold.amount_psi,
+            support=fold.test_events,
+        )
+        for fold in backtest
+    )
     segment_diagnostics = account_age_segment_diagnostics(model, test)
     example_event = max(test, key=model.score)
     example_explanation = model.explain(example_event)
@@ -582,6 +691,25 @@ def run(count: int, seed: int) -> dict[str, object]:
             }
             for fold in backtest
         ],
+        "drift_policy_simulation": {
+            "warning_psi": 0.1,
+            "critical_psi": 0.25,
+            "minimum_support": 50,
+            "critical_windows_required": 2,
+            "executes_actions": False,
+            "decisions": [
+                {
+                    "window_start": decision.window_start,
+                    "window_end": decision.window_end,
+                    "amount_psi": round(decision.amount_psi, 6),
+                    "support": decision.support,
+                    "consecutive_critical_windows": decision.consecutive_critical_windows,
+                    "candidate_response": decision.candidate_response,
+                    "reason": decision.reason,
+                }
+                for decision in drift_policy
+            ],
+        },
         "limitations": [
             "statistical baseline, not a production fraud decision system",
             "labels and events are generated, not representative of real customers",
@@ -590,6 +718,7 @@ def run(count: int, seed: int) -> dict[str, object]:
             "account-age cohorts are descriptive diagnostics, not fairness or policy evidence",
             "scaling comparisons use synthetic labels and do not establish production robustness",
             "score contributions are mathematical decompositions, not causal explanations",
+            "drift policy output is a simulation for human review and executes no actions",
         ],
     }
 
