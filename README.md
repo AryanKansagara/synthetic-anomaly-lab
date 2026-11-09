@@ -11,7 +11,8 @@ This independent portfolio project is not affiliated with Wealthsimple or any fi
 - fits log transforms, median centers, scales, and a score threshold on the training partition only;
 - compares standard-deviation scaling with normalized median absolute deviation (MAD)
   scaling on the same untouched holdout, with both variants fitted on past data only;
-- reports holdout precision, recall, F1, and amount-feature population stability index (PSI);
+- reports holdout precision, recall, F1, and population stability index (PSI) for
+  every fixed transformed model feature, with baseline/current support counts;
 - decomposes the highest holdout score into exact, ranked per-feature contributions
   using only the fitted training centers and scales;
 - reports the same metrics with support counts for three fixed account-age cohorts,
@@ -19,7 +20,7 @@ This independent portfolio project is not affiliated with Wealthsimple or any fi
 - compares the training-quantile threshold with an F1-selected threshold whose
   labels come only from a chronological historical calibration window;
 - runs four expanding-window temporal backtests, refitting on past-only history before
-  each untouched future window and reporting per-window metrics and PSI;
+  each untouched future window and reporting per-window metrics and per-feature PSI;
 - simulates a bounded amount-PSI response policy that requires two consecutive,
   sufficiently supported critical windows before proposing a pause and human review;
 - provides unit coverage for reproducibility, leakage boundaries, model utility, drift, and validation;
@@ -36,6 +37,6 @@ Example output is JSON and explicitly marks the data as `synthetic-only`. Exact 
 
 ## Design boundaries
 
-This is an educational statistical baseline, not a production fraud decision system. Synthetic labels are intentionally obvious and are not evidence of performance on real customers. The model has no identity, authorization, case-management, feedback, fairness, probability calibration, causal explainability, or human-review workflow. The additive feature contributions exactly decompose this model's squared standardized-distance score; they are not causal reasons, counterfactuals, probabilities, SHAP values, or evidence that a transaction is fraudulent. PSI indicates distribution change; it does not explain the cause or determine whether a model remains safe. The drift policy is a deterministic simulation: it executes no pause, transaction, model, or customer action, and its generic thresholds have not been validated for real data. Account-age cohort metrics are descriptive debugging aids, not fairness evidence or a basis for authorization, credit, fraud, or customer-treatment policy; small cohorts are explicitly flagged and zero-valued rates can reflect absent labels or predictions. A production system would require representative consented data, domain-specific cost analysis, privacy/security review, monitored deployment, governance, and human escalation.
+This is an educational statistical baseline, not a production fraud decision system. Synthetic labels are intentionally obvious and are not evidence of performance on real customers. The model has no identity, authorization, case-management, feedback, fairness, probability calibration, causal explainability, or human-review workflow. The additive feature contributions exactly decompose this model's squared standardized-distance score; they are not causal reasons, counterfactuals, probabilities, SHAP values, or evidence that a transaction is fraudulent. Per-feature PSI reuses past-only bucket boundaries and indicates distribution change; it does not explain the cause, measure feature importance, or determine whether a model remains safe. The drift policy currently consumes amount PSI only and is a deterministic simulation: it executes no pause, transaction, model, or customer action, and its generic thresholds have not been validated for real data. Account-age cohort metrics are descriptive debugging aids, not fairness evidence or a basis for authorization, credit, fraud, or customer-treatment policy; small cohorts are explicitly flagged and zero-valued rates can reflect absent labels or predictions. A production system would require representative consented data, domain-specific cost analysis, privacy/security review, monitored deployment, governance, and human escalation.
 
 Standard-deviation scaling is sensitive to contaminated training data; normalized MAD is more resistant to extreme values but can collapse for low-variance features and therefore uses a small numerical floor. Neither strategy establishes robustness on real data, and both quantile thresholds assume a configured normal fraction. The historical-label strategy maximizes F1 on generated labels; it is not probability calibration and does not encode real investigation costs. It falls back to the unsupervised quantile when its calibration window has no positive label. Rolling folds are not independent because their training histories overlap, and good synthetic backtest metrics do not establish production performance. Later slices can compare supervised baselines without weakening the chronological boundary.
