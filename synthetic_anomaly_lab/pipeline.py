@@ -133,6 +133,16 @@ class Evaluation:
 
 
 @dataclass(frozen=True, slots=True)
+class FeatureDrift:
+    """PSI for one fixed transformed feature and its comparison support."""
+
+    feature: str
+    psi: float
+    baseline_support: int
+    current_support: int
+
+
+@dataclass(frozen=True, slots=True)
 class BacktestFold:
     """One expanding-window evaluation with an untouched future test window."""
 
@@ -145,6 +155,7 @@ class BacktestFold:
     threshold: float
     evaluation: Evaluation
     amount_psi: float
+    feature_drift: tuple[FeatureDrift, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -442,6 +453,35 @@ def population_stability_index(
     return psi
 
 
+def feature_drift_diagnostics(
+    baseline: Sequence[Event], current: Sequence[Event], *, bins: int = 10
+) -> tuple[FeatureDrift, ...]:
+    """Measure PSI for every fixed model feature using past-only bucket boundaries.
+
+    Feature values use the same deterministic transforms as model fitting. Results
+    retain ``FEATURE_NAMES`` order so consumers never infer a schema from PSI rank.
+    PSI is a distribution-change diagnostic, not a cause, safety decision, or
+    feature-importance measure.
+    """
+    if len(baseline) < bins or not current:
+        raise ValueError("baseline must fill every bin and current cannot be empty")
+    baseline_rows = [event.features() for event in baseline]
+    current_rows = [event.features() for event in current]
+    return tuple(
+        FeatureDrift(
+            feature=name,
+            psi=population_stability_index(
+                [row[index] for row in baseline_rows],
+                [row[index] for row in current_rows],
+                bins=bins,
+            ),
+            baseline_support=len(baseline_rows),
+            current_support=len(current_rows),
+        )
+        for index, name in enumerate(FEATURE_NAMES)
+    )
+
+
 def simulate_drift_policy(
     windows: Iterable[DriftWindow],
     *,
@@ -551,6 +591,7 @@ def rolling_backtest(
         train = ordered[:test_start_index]
         test = ordered[test_start_index:test_end_index]
         model = fit(train)
+        feature_drift = feature_drift_diagnostics(train, test)
         results.append(
             BacktestFold(
                 train_start=train[0].occurred_at,
@@ -561,10 +602,8 @@ def rolling_backtest(
                 test_events=len(test),
                 threshold=model.threshold,
                 evaluation=evaluate(model, test),
-                amount_psi=population_stability_index(
-                    [event.features()[0] for event in train],
-                    [event.features()[0] for event in test],
-                ),
+                amount_psi=feature_drift[0].psi,
+                feature_drift=feature_drift,
             )
         )
         test_start_index = test_end_index
@@ -580,10 +619,8 @@ def run(count: int, seed: int) -> dict[str, object]:
     robust_metrics = evaluate(robust_model, test)
     historical_selection = fit_historical_threshold(train)
     historical_metrics = evaluate(historical_selection.model, test)
-    amount_psi = population_stability_index(
-        [event.features()[0] for event in train],
-        [event.features()[0] for event in test],
-    )
+    feature_drift = feature_drift_diagnostics(train, test)
+    amount_psi = feature_drift[0].psi
     backtest = rolling_backtest(events)
     drift_policy = simulate_drift_policy(
         DriftWindow(
@@ -607,6 +644,15 @@ def run(count: int, seed: int) -> dict[str, object]:
         "recall": round(metrics.recall, 6),
         "f1": round(metrics.f1, 6),
         "amount_psi": round(amount_psi, 6),
+        "feature_drift": [
+            {
+                "feature": diagnostic.feature,
+                "psi": round(diagnostic.psi, 6),
+                "baseline_support": diagnostic.baseline_support,
+                "current_support": diagnostic.current_support,
+            }
+            for diagnostic in feature_drift
+        ],
         "highest_score_explanation": {
             "occurred_at": example_event.occurred_at,
             "score": round(example_explanation.score, 6),
@@ -688,6 +734,15 @@ def run(count: int, seed: int) -> dict[str, object]:
                 "recall": round(fold.evaluation.recall, 6),
                 "f1": round(fold.evaluation.f1, 6),
                 "amount_psi": round(fold.amount_psi, 6),
+                "feature_drift": [
+                    {
+                        "feature": diagnostic.feature,
+                        "psi": round(diagnostic.psi, 6),
+                        "baseline_support": diagnostic.baseline_support,
+                        "current_support": diagnostic.current_support,
+                    }
+                    for diagnostic in fold.feature_drift
+                ],
             }
             for fold in backtest
         ],
@@ -719,6 +774,7 @@ def run(count: int, seed: int) -> dict[str, object]:
             "scaling comparisons use synthetic labels and do not establish production robustness",
             "score contributions are mathematical decompositions, not causal explanations",
             "drift policy output is a simulation for human review and executes no actions",
+            "per-feature PSI detects distribution change, not its cause or model safety",
         ],
     }
 

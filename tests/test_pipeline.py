@@ -9,6 +9,7 @@ from synthetic_anomaly_lab.pipeline import (
     account_age_segment_diagnostics,
     chronological_split,
     evaluate,
+    feature_drift_diagnostics,
     fit,
     fit_historical_threshold,
     generate_events,
@@ -156,6 +157,33 @@ class PipelineTests(unittest.TestCase):
         shifted = [value + 100.0 for value in baseline]
         self.assertGreater(population_stability_index(baseline, shifted), 1.0)
 
+    def test_feature_drift_covers_fixed_schema_and_uses_past_boundaries(self) -> None:
+        baseline, current = chronological_split(generate_events(500, seed=19))
+        diagnostics = feature_drift_diagnostics(baseline, current)
+        shifted_velocity = [
+            dataclasses.replace(event, velocity_1h=event.velocity_1h + 1_000)
+            for event in current
+        ]
+        shifted = feature_drift_diagnostics(baseline, shifted_velocity)
+
+        self.assertEqual(
+            [item.feature for item in diagnostics],
+            ["log_amount_minor", "log_account_age_days", "log_velocity_1h"],
+        )
+        self.assertTrue(all(item.baseline_support == 350 for item in diagnostics))
+        self.assertTrue(all(item.current_support == 150 for item in diagnostics))
+        self.assertEqual(diagnostics[:2], shifted[:2])
+        self.assertGreater(shifted[2].psi, diagnostics[2].psi)
+
+    def test_feature_drift_validates_support_and_events(self) -> None:
+        events = generate_events(20)
+        with self.assertRaisesRegex(ValueError, "fill every bin"):
+            feature_drift_diagnostics(events[:9], events[9:])
+        with self.assertRaisesRegex(ValueError, "cannot be empty"):
+            feature_drift_diagnostics(events[:10], [])
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            feature_drift_diagnostics(events[:10], [Event(1, 1, 1, -1, False)])
+
     def test_segment_diagnostics_are_bounded_complete_and_support_aware(self) -> None:
         train, test = chronological_split(generate_events(2_000, seed=7))
         model = fit(train)
@@ -287,7 +315,7 @@ class PipelineTests(unittest.TestCase):
         assert isinstance(limitations, list)
         assert isinstance(precision, float)
         assert isinstance(recall, float)
-        self.assertEqual(len(limitations), 8)
+        self.assertEqual(len(limitations), 9)
         self.assertTrue(0.0 <= precision <= 1.0)
         self.assertTrue(0.0 <= recall <= 1.0)
         backtest = report["rolling_backtest"]
@@ -334,6 +362,18 @@ class PipelineTests(unittest.TestCase):
                 )
             ],
         )
+        feature_drift = report["feature_drift"]
+        self.assertIsInstance(feature_drift, list)
+        assert isinstance(feature_drift, list)
+        self.assertEqual(
+            [item["feature"] for item in feature_drift],
+            ["log_amount_minor", "log_account_age_days", "log_velocity_1h"],
+        )
+        self.assertTrue(
+            all(item["baseline_support"] == 350 for item in feature_drift)
+        )
+        self.assertTrue(all(item["current_support"] == 150 for item in feature_drift))
+        self.assertTrue(all(len(fold["feature_drift"]) == 3 for fold in backtest))
         policy = report["drift_policy_simulation"]
         self.assertIsInstance(policy, dict)
         assert isinstance(policy, dict)
