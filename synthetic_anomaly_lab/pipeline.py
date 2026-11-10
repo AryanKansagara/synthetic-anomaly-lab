@@ -134,12 +134,16 @@ class Evaluation:
 
 @dataclass(frozen=True, slots=True)
 class FeatureDrift:
-    """PSI for one fixed transformed feature and its comparison support."""
+    """PSI for one fixed transformed feature and its bucket/support context."""
 
     feature: str
     psi: float
     baseline_support: int
     current_support: int
+    requested_bins: int
+    effective_bins: int
+    baseline_unique_values: int
+    degenerate_baseline: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,10 +431,18 @@ def population_stability_index(
     baseline: Sequence[float], current: Sequence[float], *, bins: int = 10
 ) -> float:
     """Compare one numeric feature against baseline quantile buckets."""
-    if len(baseline) < bins or not current:
-        raise ValueError("baseline must fill every bin and current cannot be empty")
+    psi, _, _ = _population_stability_details(baseline, current, bins=bins)
+    return psi
+
+
+def _population_stability_details(
+    baseline: Sequence[float], current: Sequence[float], *, bins: int
+) -> tuple[float, int, int]:
+    """Return PSI, effective bucket count, and baseline cardinality."""
     if bins < 2 or bins > 100:
         raise ValueError("bins must be in [2, 100]")
+    if len(baseline) < bins or not current:
+        raise ValueError("baseline must fill every bin and current cannot be empty")
     if not all(math.isfinite(value) for value in (*baseline, *current)):
         raise ValueError("values must be finite")
     boundaries = sorted(
@@ -450,7 +462,7 @@ def population_stability_index(
         psi += (current_share - baseline_share) * math.log(
             current_share / baseline_share
         )
-    return psi
+    return psi, sum(count > 0 for count in baseline_counts), len(set(baseline))
 
 
 def feature_drift_diagnostics(
@@ -463,23 +475,32 @@ def feature_drift_diagnostics(
     PSI is a distribution-change diagnostic, not a cause, safety decision, or
     feature-importance measure.
     """
+    if bins < 2 or bins > 100:
+        raise ValueError("bins must be in [2, 100]")
     if len(baseline) < bins or not current:
         raise ValueError("baseline must fill every bin and current cannot be empty")
     baseline_rows = [event.features() for event in baseline]
     current_rows = [event.features() for event in current]
-    return tuple(
-        FeatureDrift(
-            feature=name,
-            psi=population_stability_index(
-                [row[index] for row in baseline_rows],
-                [row[index] for row in current_rows],
-                bins=bins,
-            ),
-            baseline_support=len(baseline_rows),
-            current_support=len(current_rows),
+    diagnostics: list[FeatureDrift] = []
+    for index, name in enumerate(FEATURE_NAMES):
+        psi, effective_bins, unique_values = _population_stability_details(
+            [row[index] for row in baseline_rows],
+            [row[index] for row in current_rows],
+            bins=bins,
         )
-        for index, name in enumerate(FEATURE_NAMES)
-    )
+        diagnostics.append(
+            FeatureDrift(
+                feature=name,
+                psi=psi,
+                baseline_support=len(baseline_rows),
+                current_support=len(current_rows),
+                requested_bins=bins,
+                effective_bins=effective_bins,
+                baseline_unique_values=unique_values,
+                degenerate_baseline=effective_bins < bins,
+            )
+        )
+    return tuple(diagnostics)
 
 
 def simulate_drift_policy(
@@ -650,6 +671,10 @@ def run(count: int, seed: int) -> dict[str, object]:
                 "psi": round(diagnostic.psi, 6),
                 "baseline_support": diagnostic.baseline_support,
                 "current_support": diagnostic.current_support,
+                "requested_bins": diagnostic.requested_bins,
+                "effective_bins": diagnostic.effective_bins,
+                "baseline_unique_values": diagnostic.baseline_unique_values,
+                "degenerate_baseline": diagnostic.degenerate_baseline,
             }
             for diagnostic in feature_drift
         ],
@@ -740,6 +765,10 @@ def run(count: int, seed: int) -> dict[str, object]:
                         "psi": round(diagnostic.psi, 6),
                         "baseline_support": diagnostic.baseline_support,
                         "current_support": diagnostic.current_support,
+                        "requested_bins": diagnostic.requested_bins,
+                        "effective_bins": diagnostic.effective_bins,
+                        "baseline_unique_values": diagnostic.baseline_unique_values,
+                        "degenerate_baseline": diagnostic.degenerate_baseline,
                     }
                     for diagnostic in fold.feature_drift
                 ],

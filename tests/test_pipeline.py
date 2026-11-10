@@ -184,6 +184,18 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-negative"):
             feature_drift_diagnostics(events[:10], [Event(1, 1, 1, -1, False)])
 
+    def test_feature_drift_exposes_collapsed_quantile_buckets(self) -> None:
+        baseline = [Event(index, 100, 30, 2, False) for index in range(20)]
+        current = [Event(100 + index, 100, 30, 2, False) for index in range(10)]
+
+        diagnostics = feature_drift_diagnostics(baseline, current)
+
+        self.assertTrue(all(item.psi == 0.0 for item in diagnostics))
+        self.assertTrue(all(item.requested_bins == 10 for item in diagnostics))
+        self.assertTrue(all(item.effective_bins == 1 for item in diagnostics))
+        self.assertTrue(all(item.baseline_unique_values == 1 for item in diagnostics))
+        self.assertTrue(all(item.degenerate_baseline for item in diagnostics))
+
     def test_segment_diagnostics_are_bounded_complete_and_support_aware(self) -> None:
         train, test = chronological_split(generate_events(2_000, seed=7))
         model = fit(train)
@@ -373,6 +385,17 @@ class PipelineTests(unittest.TestCase):
             all(item["baseline_support"] == 350 for item in feature_drift)
         )
         self.assertTrue(all(item["current_support"] == 150 for item in feature_drift))
+        self.assertTrue(all(item["requested_bins"] == 10 for item in feature_drift))
+        self.assertTrue(
+            all(
+                1 <= item["effective_bins"] <= item["requested_bins"]
+                for item in feature_drift
+            )
+        )
+        self.assertTrue(
+            all(item["baseline_unique_values"] >= 1 for item in feature_drift)
+        )
+        self.assertTrue(all("degenerate_baseline" in item for item in feature_drift))
         self.assertTrue(all(len(fold["feature_drift"]) == 3 for fold in backtest))
         policy = report["drift_policy_simulation"]
         self.assertIsInstance(policy, dict)
