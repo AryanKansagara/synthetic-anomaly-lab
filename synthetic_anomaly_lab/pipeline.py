@@ -210,6 +210,30 @@ class DriftPolicyDecision:
     reason: str
 
 
+@dataclass(frozen=True, slots=True)
+class FeatureDriftWindow:
+    """One ordered window containing the fixed-schema feature diagnostics."""
+
+    start: int
+    end: int
+    diagnostics: tuple[FeatureDrift, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureDriftPolicyDecision:
+    """A simulated response to supported, non-degenerate per-feature PSI."""
+
+    window_start: int
+    window_end: int
+    trigger_feature: str | None
+    trigger_psi: float | None
+    eligible_features: tuple[str, ...]
+    excluded_features: tuple[str, ...]
+    consecutive_critical_windows: int
+    candidate_response: str
+    reason: str
+
+
 def generate_events(count: int, *, seed: int = 7) -> list[Event]:
     """Generate deterministic labeled data; no external or personal data is used."""
     if count < 20:
@@ -580,6 +604,119 @@ def simulate_drift_policy(
     return decisions
 
 
+def simulate_feature_drift_policy(
+    windows: Iterable[FeatureDriftWindow],
+    *,
+    warning_psi: float = 0.1,
+    critical_psi: float = 0.25,
+    minimum_support: int = 50,
+    minimum_effective_bins: int = 2,
+    critical_windows_required: int = 2,
+) -> list[FeatureDriftPolicyDecision]:
+    """Simulate review candidates from all fixed model-feature diagnostics.
+
+    A feature is eligible only when both samples meet the support gate and its
+    baseline retains enough effective quantile buckets. The highest-PSI eligible feature
+    deterministically drives each window. Critical escalation requires the same
+    feature to remain critical across consecutive windows. This simulation never
+    executes an operational action.
+    """
+    if not (
+        math.isfinite(warning_psi)
+        and math.isfinite(critical_psi)
+        and 0.0 <= warning_psi < critical_psi
+    ):
+        raise ValueError(
+            "PSI thresholds must be finite and satisfy 0 <= warning < critical"
+        )
+    if not 1 <= minimum_support <= 1_000_000:
+        raise ValueError("minimum_support must be in [1, 1000000]")
+    if not 2 <= minimum_effective_bins <= 100:
+        raise ValueError("minimum_effective_bins must be in [2, 100]")
+    if not 1 <= critical_windows_required <= 10:
+        raise ValueError("critical_windows_required must be in [1, 10]")
+
+    decisions: list[FeatureDriftPolicyDecision] = []
+    previous_end: int | None = None
+    critical_feature: str | None = None
+    critical_streak = 0
+    expected_features = set(FEATURE_NAMES)
+    for window in windows:
+        if window.start < 0 or window.end <= window.start:
+            raise ValueError("window bounds must be non-negative with end after start")
+        if previous_end is not None and window.start <= previous_end:
+            raise ValueError("windows must be strictly ordered and non-overlapping")
+        names = [diagnostic.feature for diagnostic in window.diagnostics]
+        if len(names) != len(set(names)) or set(names) != expected_features:
+            raise ValueError("diagnostics must contain each fixed model feature exactly once")
+        if any(
+            not math.isfinite(diagnostic.psi) or diagnostic.psi < 0
+            for diagnostic in window.diagnostics
+        ):
+            raise ValueError("feature PSI must be finite and non-negative")
+        if any(
+            diagnostic.baseline_support < 0 or diagnostic.current_support < 0
+            for diagnostic in window.diagnostics
+        ):
+            raise ValueError("feature support must be non-negative")
+
+        eligible = tuple(
+            diagnostic
+            for diagnostic in window.diagnostics
+            if diagnostic.effective_bins >= minimum_effective_bins
+            and diagnostic.baseline_support >= minimum_support
+            and diagnostic.current_support >= minimum_support
+        )
+        eligible_names = tuple(sorted(item.feature for item in eligible))
+        excluded_names = tuple(sorted(expected_features - set(eligible_names)))
+        if not eligible:
+            trigger = None
+            critical_feature = None
+            critical_streak = 0
+            response = "collect_more_evidence"
+            reason = "no_supported_feature_with_sufficient_buckets"
+        else:
+            trigger = min(eligible, key=lambda item: (-item.psi, item.feature))
+            if trigger.psi >= critical_psi:
+                if trigger.feature == critical_feature:
+                    critical_streak += 1
+                else:
+                    critical_feature = trigger.feature
+                    critical_streak = 1
+                if critical_streak >= critical_windows_required:
+                    response = "candidate_pause_and_human_review"
+                    reason = "sustained_critical_feature_psi"
+                else:
+                    response = "investigate"
+                    reason = "first_critical_feature_psi"
+            elif trigger.psi >= warning_psi:
+                critical_feature = None
+                critical_streak = 0
+                response = "investigate"
+                reason = "warning_feature_psi"
+            else:
+                critical_feature = None
+                critical_streak = 0
+                response = "monitor"
+                reason = "below_warning_feature_psi"
+
+        decisions.append(
+            FeatureDriftPolicyDecision(
+                window_start=window.start,
+                window_end=window.end,
+                trigger_feature=trigger.feature if trigger else None,
+                trigger_psi=trigger.psi if trigger else None,
+                eligible_features=eligible_names,
+                excluded_features=excluded_names,
+                consecutive_critical_windows=critical_streak,
+                candidate_response=response,
+                reason=reason,
+            )
+        )
+        previous_end = window.end
+    return decisions
+
+
 def rolling_backtest(
     events: Sequence[Event], *, folds: int = 4, initial_train_fraction: float = 0.5
 ) -> list[BacktestFold]:
@@ -643,12 +780,11 @@ def run(count: int, seed: int) -> dict[str, object]:
     feature_drift = feature_drift_diagnostics(train, test)
     amount_psi = feature_drift[0].psi
     backtest = rolling_backtest(events)
-    drift_policy = simulate_drift_policy(
-        DriftWindow(
+    drift_policy = simulate_feature_drift_policy(
+        FeatureDriftWindow(
             start=fold.test_start,
             end=fold.test_end,
-            amount_psi=fold.amount_psi,
-            support=fold.test_events,
+            diagnostics=fold.feature_drift,
         )
         for fold in backtest
     )
@@ -779,14 +915,21 @@ def run(count: int, seed: int) -> dict[str, object]:
             "warning_psi": 0.1,
             "critical_psi": 0.25,
             "minimum_support": 50,
+            "minimum_effective_bins": 2,
             "critical_windows_required": 2,
             "executes_actions": False,
             "decisions": [
                 {
                     "window_start": decision.window_start,
                     "window_end": decision.window_end,
-                    "amount_psi": round(decision.amount_psi, 6),
-                    "support": decision.support,
+                    "trigger_feature": decision.trigger_feature,
+                    "trigger_psi": (
+                        round(decision.trigger_psi, 6)
+                        if decision.trigger_psi is not None
+                        else None
+                    ),
+                    "eligible_features": list(decision.eligible_features),
+                    "excluded_features": list(decision.excluded_features),
                     "consecutive_critical_windows": decision.consecutive_critical_windows,
                     "candidate_response": decision.candidate_response,
                     "reason": decision.reason,
@@ -803,7 +946,7 @@ def run(count: int, seed: int) -> dict[str, object]:
             "scaling comparisons use synthetic labels and do not establish production robustness",
             "score contributions are mathematical decompositions, not causal explanations",
             "drift policy output is a simulation for human review and executes no actions",
-            "per-feature PSI detects distribution change, not its cause or model safety",
+            "per-feature PSI policy excludes degenerate or under-supported diagnostics and executes no actions",
         ],
     }
 
