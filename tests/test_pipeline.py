@@ -6,6 +6,8 @@ from synthetic_anomaly_lab.pipeline import (
     AnomalyModel,
     DriftWindow,
     Event,
+    FeatureDrift,
+    FeatureDriftWindow,
     account_age_segment_diagnostics,
     chronological_split,
     evaluate,
@@ -17,6 +19,7 @@ from synthetic_anomaly_lab.pipeline import (
     rolling_backtest,
     run,
     simulate_drift_policy,
+    simulate_feature_drift_policy,
 )
 
 
@@ -289,6 +292,85 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "finite and non-negative"):
             simulate_drift_policy([DriftWindow(1, 2, math.inf, 50)])
 
+    def test_feature_drift_policy_gates_and_tracks_the_same_trigger(self) -> None:
+        def diagnostic(
+            feature: str, psi: float, *, support: int = 100, degenerate: bool = False
+        ) -> FeatureDrift:
+            return FeatureDrift(
+                feature=feature,
+                psi=psi,
+                baseline_support=support,
+                current_support=support,
+                requested_bins=10,
+                effective_bins=1 if degenerate else 10,
+                baseline_unique_values=20,
+                degenerate_baseline=degenerate,
+            )
+
+        decisions = simulate_feature_drift_policy(
+            [
+                FeatureDriftWindow(
+                    1,
+                    2,
+                    (
+                        diagnostic("log_amount_minor", 0.30),
+                        diagnostic("log_account_age_days", 0.05),
+                        diagnostic("log_velocity_1h", 0.90, degenerate=True),
+                    ),
+                ),
+                FeatureDriftWindow(
+                    3,
+                    4,
+                    (
+                        diagnostic("log_amount_minor", 0.40),
+                        diagnostic("log_account_age_days", 0.35),
+                        diagnostic("log_velocity_1h", 0.05),
+                    ),
+                ),
+                FeatureDriftWindow(
+                    5,
+                    6,
+                    (
+                        diagnostic("log_amount_minor", 0.30, support=10),
+                        diagnostic("log_account_age_days", 0.40, support=10),
+                        diagnostic("log_velocity_1h", 0.50, support=10),
+                    ),
+                ),
+            ]
+        )
+
+        self.assertEqual(
+            [decision.candidate_response for decision in decisions],
+            [
+                "investigate",
+                "candidate_pause_and_human_review",
+                "collect_more_evidence",
+            ],
+        )
+        self.assertEqual(decisions[0].trigger_feature, "log_amount_minor")
+        self.assertEqual(decisions[0].excluded_features, ("log_velocity_1h",))
+        self.assertEqual(decisions[1].consecutive_critical_windows, 2)
+        self.assertIsNone(decisions[2].trigger_feature)
+
+    def test_feature_drift_policy_validates_fixed_schema_and_order(self) -> None:
+        diagnostic = FeatureDrift("log_amount_minor", 0.1, 100, 100, 10, 10, 100, False)
+        with self.assertRaisesRegex(ValueError, "each fixed model feature"):
+            simulate_feature_drift_policy([FeatureDriftWindow(1, 2, (diagnostic,))])
+        with self.assertRaisesRegex(ValueError, "minimum_effective_bins"):
+            simulate_feature_drift_policy([], minimum_effective_bins=1)
+        complete = tuple(
+            dataclasses.replace(diagnostic, feature=feature)
+            for feature in (
+                "log_amount_minor",
+                "log_account_age_days",
+                "log_velocity_1h",
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "strictly ordered"):
+            simulate_feature_drift_policy(
+                [FeatureDriftWindow(1, 3, complete), FeatureDriftWindow(3, 4, complete)]
+            )
+
     def test_validation_rejects_unsafe_inputs(self) -> None:
         with self.assertRaisesRegex(ValueError, "at least 20"):
             generate_events(19)
@@ -405,6 +487,12 @@ class PipelineTests(unittest.TestCase):
         self.assertIsInstance(decisions, list)
         assert isinstance(decisions, list)
         self.assertEqual(len(decisions), 4)
+        self.assertTrue(
+            all(
+                "trigger_feature" in item and "eligible_features" in item
+                for item in decisions
+            )
+        )
         self.assertTrue(
             all(item["window_start"] < item["window_end"] for item in decisions)
         )
