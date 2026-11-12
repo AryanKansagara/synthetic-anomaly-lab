@@ -20,6 +20,7 @@ from synthetic_anomaly_lab.pipeline import (
     run,
     simulate_drift_policy,
     simulate_feature_drift_policy,
+    summarize_feature_drift_policy,
 )
 
 
@@ -371,6 +372,57 @@ class PipelineTests(unittest.TestCase):
                 [FeatureDriftWindow(1, 3, complete), FeatureDriftWindow(3, 4, complete)]
             )
 
+    def test_feature_drift_policy_summary_is_bounded_and_zero_complete(self) -> None:
+        report = run(500, 9)
+        policy = report["drift_policy_simulation"]
+        self.assertIsInstance(policy, dict)
+        assert isinstance(policy, dict)
+        summary = policy["review_volume_summary"]
+        self.assertIsInstance(summary, dict)
+        assert isinstance(summary, dict)
+        response_counts = summary["response_counts"]
+        response_rates = summary["response_rates"]
+        trigger_counts = summary["trigger_feature_counts"]
+        self.assertIsInstance(response_counts, dict)
+        self.assertIsInstance(response_rates, dict)
+        self.assertIsInstance(trigger_counts, dict)
+        assert isinstance(response_counts, dict)
+        assert isinstance(response_rates, dict)
+        assert isinstance(trigger_counts, dict)
+
+        self.assertEqual(summary["window_count"], 4)
+        self.assertEqual(
+            set(response_counts),
+            {
+                "monitor",
+                "investigate",
+                "collect_more_evidence",
+                "candidate_pause_and_human_review",
+            },
+        )
+        self.assertEqual(sum(response_counts.values()), 4)
+        self.assertAlmostEqual(sum(response_rates.values()), 1.0)
+        self.assertEqual(
+            set(trigger_counts),
+            {"log_amount_minor", "log_account_age_days", "log_velocity_1h"},
+        )
+        self.assertLessEqual(sum(trigger_counts.values()), 4)
+
+        empty = summarize_feature_drift_policy([])
+        empty_response_counts = empty["response_counts"]
+        empty_response_rates = empty["response_rates"]
+        empty_trigger_counts = empty["trigger_feature_counts"]
+        empty_trigger_rates = empty["trigger_feature_rates"]
+        assert isinstance(empty_response_counts, dict)
+        assert isinstance(empty_response_rates, dict)
+        assert isinstance(empty_trigger_counts, dict)
+        assert isinstance(empty_trigger_rates, dict)
+        self.assertEqual(empty["window_count"], 0)
+        self.assertEqual(set(empty_response_counts.values()), {0})
+        self.assertEqual(set(empty_response_rates.values()), {0.0})
+        self.assertEqual(set(empty_trigger_counts.values()), {0})
+        self.assertEqual(set(empty_trigger_rates.values()), {0.0})
+
     def test_validation_rejects_unsafe_inputs(self) -> None:
         with self.assertRaisesRegex(ValueError, "at least 20"):
             generate_events(19)
@@ -483,6 +535,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIsInstance(policy, dict)
         assert isinstance(policy, dict)
         self.assertFalse(policy["executes_actions"])
+        self.assertIn("review_volume_summary", policy)
         decisions = policy["decisions"]
         self.assertIsInstance(decisions, list)
         assert isinstance(decisions, list)
