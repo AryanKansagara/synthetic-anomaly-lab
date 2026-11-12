@@ -234,6 +234,14 @@ class FeatureDriftPolicyDecision:
     reason: str
 
 
+POLICY_RESPONSES = (
+    "monitor",
+    "investigate",
+    "collect_more_evidence",
+    "candidate_pause_and_human_review",
+)
+
+
 def generate_events(count: int, *, seed: int = 7) -> list[Event]:
     """Generate deterministic labeled data; no external or personal data is used."""
     if count < 20:
@@ -717,6 +725,52 @@ def simulate_feature_drift_policy(
     return decisions
 
 
+def summarize_feature_drift_policy(
+    decisions: Iterable[FeatureDriftPolicyDecision],
+) -> dict[str, object]:
+    """Summarize bounded simulated review volume without executing any response.
+
+    Zero-count responses and fixed model features remain present so reports are
+    comparable across runs. Rates use the number of monitoring windows as their
+    denominator and are zero when no windows are supplied.
+    """
+    response_counts = {response: 0 for response in POLICY_RESPONSES}
+    trigger_feature_counts = {feature: 0 for feature in FEATURE_NAMES}
+    window_count = 0
+    max_critical_streak = 0
+
+    for decision in decisions:
+        if decision.candidate_response not in response_counts:
+            raise ValueError("candidate_response is not a supported policy response")
+        if decision.trigger_feature is not None:
+            if decision.trigger_feature not in trigger_feature_counts:
+                raise ValueError("trigger_feature is not a fixed model feature")
+            trigger_feature_counts[decision.trigger_feature] += 1
+        if decision.consecutive_critical_windows < 0:
+            raise ValueError("consecutive_critical_windows must be non-negative")
+        response_counts[decision.candidate_response] += 1
+        window_count += 1
+        max_critical_streak = max(
+            max_critical_streak, decision.consecutive_critical_windows
+        )
+
+    denominator = window_count or 1
+    return {
+        "window_count": window_count,
+        "response_counts": response_counts,
+        "response_rates": {
+            response: count / denominator
+            for response, count in response_counts.items()
+        },
+        "trigger_feature_counts": trigger_feature_counts,
+        "trigger_feature_rates": {
+            feature: count / denominator
+            for feature, count in trigger_feature_counts.items()
+        },
+        "max_consecutive_critical_windows": max_critical_streak,
+    }
+
+
 def rolling_backtest(
     events: Sequence[Event], *, folds: int = 4, initial_train_fraction: float = 0.5
 ) -> list[BacktestFold]:
@@ -788,6 +842,7 @@ def run(count: int, seed: int) -> dict[str, object]:
         )
         for fold in backtest
     )
+    drift_policy_summary = summarize_feature_drift_policy(drift_policy)
     segment_diagnostics = account_age_segment_diagnostics(model, test)
     example_event = max(test, key=model.score)
     example_explanation = model.explain(example_event)
@@ -918,6 +973,7 @@ def run(count: int, seed: int) -> dict[str, object]:
             "minimum_effective_bins": 2,
             "critical_windows_required": 2,
             "executes_actions": False,
+            "review_volume_summary": drift_policy_summary,
             "decisions": [
                 {
                     "window_start": decision.window_start,
