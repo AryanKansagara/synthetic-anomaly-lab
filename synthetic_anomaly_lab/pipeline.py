@@ -163,6 +163,20 @@ class BacktestFold:
 
 
 @dataclass(frozen=True, slots=True)
+class TemporalEvaluationSummary:
+    """Pooled and fold-range metrics over bounded future backtest windows."""
+
+    fold_count: int
+    test_events: int
+    positive_labels: int
+    predicted_positives: int
+    pooled_evaluation: Evaluation
+    minimum_fold_f1: float
+    mean_fold_f1: float
+    maximum_fold_f1: float
+
+
+@dataclass(frozen=True, slots=True)
 class ThresholdSelection:
     """A model whose threshold was selected on a past-only labeled window."""
 
@@ -822,6 +836,52 @@ def rolling_backtest(
     return results
 
 
+def summarize_temporal_evaluation(
+    folds: Iterable[BacktestFold],
+) -> TemporalEvaluationSummary:
+    """Summarize future-window performance without hiding fold variation.
+
+    Confusion counts are pooled before calculating the aggregate precision, recall,
+    and F1. The unweighted minimum, mean, and maximum fold F1 retain a compact view
+    of temporal variation. These descriptive synthetic metrics are not confidence
+    intervals, forecasts, or evidence of production stability.
+    """
+    collected = list(folds)
+    if not collected:
+        raise ValueError("at least one backtest fold is required")
+
+    for fold in collected:
+        counts = (
+            fold.evaluation.true_positives,
+            fold.evaluation.false_positives,
+            fold.evaluation.false_negatives,
+            fold.evaluation.true_negatives,
+        )
+        observed = sum(counts)
+        if any(count < 0 for count in counts):
+            raise ValueError("fold confusion counts must be non-negative")
+        if fold.test_events <= 0 or observed != fold.test_events:
+            raise ValueError("each fold must have positive, consistent test support")
+
+    pooled = Evaluation(
+        true_positives=sum(fold.evaluation.true_positives for fold in collected),
+        false_positives=sum(fold.evaluation.false_positives for fold in collected),
+        false_negatives=sum(fold.evaluation.false_negatives for fold in collected),
+        true_negatives=sum(fold.evaluation.true_negatives for fold in collected),
+    )
+    fold_f1 = [fold.evaluation.f1 for fold in collected]
+    return TemporalEvaluationSummary(
+        fold_count=len(collected),
+        test_events=sum(fold.test_events for fold in collected),
+        positive_labels=pooled.true_positives + pooled.false_negatives,
+        predicted_positives=pooled.true_positives + pooled.false_positives,
+        pooled_evaluation=pooled,
+        minimum_fold_f1=min(fold_f1),
+        mean_fold_f1=statistics.fmean(fold_f1),
+        maximum_fold_f1=max(fold_f1),
+    )
+
+
 def run(count: int, seed: int) -> dict[str, object]:
     events = generate_events(count, seed=seed)
     train, test = chronological_split(events)
@@ -834,6 +894,7 @@ def run(count: int, seed: int) -> dict[str, object]:
     feature_drift = feature_drift_diagnostics(train, test)
     amount_psi = feature_drift[0].psi
     backtest = rolling_backtest(events)
+    temporal_summary = summarize_temporal_evaluation(backtest)
     drift_policy = simulate_feature_drift_policy(
         FeatureDriftWindow(
             start=fold.test_start,
@@ -966,6 +1027,20 @@ def run(count: int, seed: int) -> dict[str, object]:
             }
             for fold in backtest
         ],
+        "temporal_evaluation_summary": {
+            "fold_count": temporal_summary.fold_count,
+            "test_events": temporal_summary.test_events,
+            "positive_labels": temporal_summary.positive_labels,
+            "predicted_positives": temporal_summary.predicted_positives,
+            "pooled_precision": round(
+                temporal_summary.pooled_evaluation.precision, 6
+            ),
+            "pooled_recall": round(temporal_summary.pooled_evaluation.recall, 6),
+            "pooled_f1": round(temporal_summary.pooled_evaluation.f1, 6),
+            "minimum_fold_f1": round(temporal_summary.minimum_fold_f1, 6),
+            "mean_fold_f1": round(temporal_summary.mean_fold_f1, 6),
+            "maximum_fold_f1": round(temporal_summary.maximum_fold_f1, 6),
+        },
         "drift_policy_simulation": {
             "warning_psi": 0.1,
             "critical_psi": 0.25,
@@ -1003,6 +1078,7 @@ def run(count: int, seed: int) -> dict[str, object]:
             "score contributions are mathematical decompositions, not causal explanations",
             "drift policy output is a simulation for human review and executes no actions",
             "per-feature PSI policy excludes degenerate or under-supported diagnostics and executes no actions",
+            "temporal metric summaries describe four synthetic folds, not confidence intervals or production stability",
         ],
     }
 
