@@ -21,6 +21,7 @@ from synthetic_anomaly_lab.pipeline import (
     simulate_drift_policy,
     simulate_feature_drift_policy,
     summarize_feature_drift_policy,
+    summarize_temporal_evaluation,
 )
 
 
@@ -258,6 +259,58 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(original[0], mutated[0])
         self.assertNotEqual(original[-1], mutated[-1])
 
+    def test_temporal_summary_pools_counts_and_retains_fold_range(self) -> None:
+        folds = rolling_backtest(generate_events(2_000, seed=7))
+        summary = summarize_temporal_evaluation(folds)
+
+        self.assertEqual(summary.fold_count, 4)
+        self.assertEqual(summary.test_events, 1_000)
+        self.assertEqual(
+            summary.positive_labels,
+            sum(
+                fold.evaluation.true_positives + fold.evaluation.false_negatives
+                for fold in folds
+            ),
+        )
+        self.assertEqual(
+            summary.predicted_positives,
+            sum(
+                fold.evaluation.true_positives + fold.evaluation.false_positives
+                for fold in folds
+            ),
+        )
+        self.assertEqual(
+            summary.minimum_fold_f1, min(fold.evaluation.f1 for fold in folds)
+        )
+        self.assertEqual(
+            summary.maximum_fold_f1, max(fold.evaluation.f1 for fold in folds)
+        )
+        self.assertAlmostEqual(
+            summary.mean_fold_f1,
+            sum(fold.evaluation.f1 for fold in folds) / len(folds),
+        )
+
+    def test_temporal_summary_rejects_empty_or_inconsistent_folds(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            summarize_temporal_evaluation([])
+        fold = rolling_backtest(generate_events(100))[0]
+        with self.assertRaisesRegex(ValueError, "consistent test support"):
+            summarize_temporal_evaluation(
+                [dataclasses.replace(fold, test_events=fold.test_events + 1)]
+            )
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            summarize_temporal_evaluation(
+                [
+                    dataclasses.replace(
+                        fold,
+                        evaluation=dataclasses.replace(
+                            fold.evaluation, true_positives=-1
+                        ),
+                        test_events=fold.test_events - 1,
+                    )
+                ]
+            )
+
     def test_drift_policy_requires_supported_consecutive_critical_windows(self) -> None:
         decisions = simulate_drift_policy(
             [
@@ -461,7 +514,7 @@ class PipelineTests(unittest.TestCase):
         assert isinstance(limitations, list)
         assert isinstance(precision, float)
         assert isinstance(recall, float)
-        self.assertEqual(len(limitations), 9)
+        self.assertEqual(len(limitations), 10)
         self.assertTrue(0.0 <= precision <= 1.0)
         self.assertTrue(0.0 <= recall <= 1.0)
         backtest = report["rolling_backtest"]
@@ -471,6 +524,17 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(sum(fold["test_events"] for fold in backtest), 250)
         self.assertTrue(
             all(fold["train_end"] < fold["test_start"] for fold in backtest)
+        )
+        temporal_summary = report["temporal_evaluation_summary"]
+        self.assertIsInstance(temporal_summary, dict)
+        assert isinstance(temporal_summary, dict)
+        self.assertEqual(temporal_summary["fold_count"], 4)
+        self.assertEqual(temporal_summary["test_events"], 250)
+        self.assertLessEqual(
+            temporal_summary["minimum_fold_f1"], temporal_summary["mean_fold_f1"]
+        )
+        self.assertLessEqual(
+            temporal_summary["mean_fold_f1"], temporal_summary["maximum_fold_f1"]
         )
         comparison = report["threshold_comparison"]
         self.assertIsInstance(comparison, list)
