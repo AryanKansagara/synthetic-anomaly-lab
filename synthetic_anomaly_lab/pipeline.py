@@ -190,6 +190,16 @@ class ThresholdSelection:
 
 
 @dataclass(frozen=True, slots=True)
+class ThresholdOperatingPoint:
+    """Future-window metrics for one threshold fixed from past score quantiles."""
+
+    expected_normal_fraction: float
+    threshold: float
+    predicted_positives: int
+    evaluation: Evaluation
+
+
+@dataclass(frozen=True, slots=True)
 class SegmentEvaluation:
     """Evaluation for one bounded account-age cohort."""
 
@@ -430,6 +440,49 @@ def evaluate(model: AnomalyModel, events: Iterable[Event]) -> Evaluation:
         else:
             tn += 1
     return Evaluation(tp, fp, fn, tn)
+
+
+def threshold_operating_points(
+    training_events: Sequence[Event],
+    future_events: Sequence[Event],
+    *,
+    expected_normal_fractions: Sequence[float] = (0.90, 0.94, 0.97, 0.99),
+) -> tuple[ThresholdOperatingPoint, ...]:
+    """Evaluate fixed past-only score quantiles on one untouched future window.
+
+    Centers, scales, and every candidate threshold use training events only. Future
+    labels are read solely to describe each already-fixed operating point; this
+    function does not select or recommend one of them.
+    """
+    fractions = tuple(expected_normal_fractions)
+    if not fractions:
+        raise ValueError("at least one expected_normal_fraction is required")
+    if any(
+        not math.isfinite(fraction) or not 0.5 <= fraction < 1.0
+        for fraction in fractions
+    ):
+        raise ValueError("expected_normal_fractions must be finite and in [0.5, 1.0)")
+    if tuple(sorted(set(fractions))) != fractions:
+        raise ValueError("expected_normal_fractions must be unique and increasing")
+    if not future_events:
+        raise ValueError("at least one future event is required")
+
+    base_model = fit(training_events)
+    training_scores = [base_model.score(event) for event in training_events]
+    results: list[ThresholdOperatingPoint] = []
+    for fraction in fractions:
+        threshold = _quantile(training_scores, fraction)
+        model = dataclasses.replace(base_model, threshold=threshold)
+        metrics = evaluate(model, future_events)
+        results.append(
+            ThresholdOperatingPoint(
+                expected_normal_fraction=fraction,
+                threshold=threshold,
+                predicted_positives=metrics.true_positives + metrics.false_positives,
+                evaluation=metrics,
+            )
+        )
+    return tuple(results)
 
 
 def account_age_segment_diagnostics(
@@ -891,6 +944,7 @@ def run(count: int, seed: int) -> dict[str, object]:
     robust_metrics = evaluate(robust_model, test)
     historical_selection = fit_historical_threshold(train)
     historical_metrics = evaluate(historical_selection.model, test)
+    operating_points = threshold_operating_points(train, test)
     feature_drift = feature_drift_diagnostics(train, test)
     amount_psi = feature_drift[0].psi
     backtest = rolling_backtest(events)
@@ -985,6 +1039,17 @@ def run(count: int, seed: int) -> dict[str, object]:
                 "f1": round(historical_metrics.f1, 6),
             },
         ],
+        "train_only_threshold_operating_points": [
+            {
+                "expected_normal_fraction": point.expected_normal_fraction,
+                "threshold": round(point.threshold, 6),
+                "predicted_positives": point.predicted_positives,
+                "precision": round(point.evaluation.precision, 6),
+                "recall": round(point.evaluation.recall, 6),
+                "f1": round(point.evaluation.f1, 6),
+            }
+            for point in operating_points
+        ],
         "account_age_segment_diagnostics": [
             {
                 "segment": diagnostic.segment,
@@ -1073,6 +1138,7 @@ def run(count: int, seed: int) -> dict[str, object]:
             "labels and events are generated, not representative of real customers",
             "scores require human and domain validation before any operational use",
             "historical-label threshold selection optimizes synthetic F1, not real-world cost",
+            "train-only threshold operating points are diagnostics, not a selection or capacity recommendation",
             "account-age cohorts are descriptive diagnostics, not fairness or policy evidence",
             "scaling comparisons use synthetic labels and do not establish production robustness",
             "score contributions are mathematical decompositions, not causal explanations",

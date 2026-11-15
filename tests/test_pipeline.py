@@ -22,6 +22,7 @@ from synthetic_anomaly_lab.pipeline import (
     simulate_feature_drift_policy,
     summarize_feature_drift_policy,
     summarize_temporal_evaluation,
+    threshold_operating_points,
 )
 
 
@@ -153,6 +154,55 @@ class PipelineTests(unittest.TestCase):
             selection.strategy, "unsupervised_quantile_fallback_no_positive_labels"
         )
         self.assertEqual(selection.calibration_evaluation.true_positives, 0)
+
+    def test_operating_points_fix_thresholds_from_training_only(self) -> None:
+        train, future = chronological_split(generate_events(2_000, seed=7))
+        points = threshold_operating_points(train, future)
+        relabeled_future = [
+            dataclasses.replace(event, is_anomaly=not event.is_anomaly)
+            for event in future
+        ]
+        relabeled_points = threshold_operating_points(train, relabeled_future)
+
+        self.assertEqual(
+            [point.expected_normal_fraction for point in points],
+            [0.90, 0.94, 0.97, 0.99],
+        )
+        self.assertEqual(
+            [point.threshold for point in points],
+            [point.threshold for point in relabeled_points],
+        )
+        self.assertEqual(
+            [point.predicted_positives for point in points],
+            [point.predicted_positives for point in relabeled_points],
+        )
+        self.assertNotEqual(
+            [point.evaluation for point in points],
+            [point.evaluation for point in relabeled_points],
+        )
+        self.assertEqual(
+            [point.threshold for point in points],
+            sorted(point.threshold for point in points),
+        )
+        self.assertEqual(
+            [point.predicted_positives for point in points],
+            sorted((point.predicted_positives for point in points), reverse=True),
+        )
+
+    def test_operating_points_validate_configuration_and_future_support(self) -> None:
+        events = generate_events(100)
+        with self.assertRaisesRegex(ValueError, "at least one expected"):
+            threshold_operating_points(events, events, expected_normal_fractions=())
+        with self.assertRaisesRegex(ValueError, "unique and increasing"):
+            threshold_operating_points(
+                events, events, expected_normal_fractions=(0.94, 0.90)
+            )
+        with self.assertRaisesRegex(ValueError, "finite and in"):
+            threshold_operating_points(
+                events, events, expected_normal_fractions=(0.90, math.inf)
+            )
+        with self.assertRaisesRegex(ValueError, "future event"):
+            threshold_operating_points(events, [])
 
     def test_population_stability_index(self) -> None:
         baseline = [float(value) for value in range(100)]
@@ -514,7 +564,7 @@ class PipelineTests(unittest.TestCase):
         assert isinstance(limitations, list)
         assert isinstance(precision, float)
         assert isinstance(recall, float)
-        self.assertEqual(len(limitations), 10)
+        self.assertEqual(len(limitations), 11)
         self.assertTrue(0.0 <= precision <= 1.0)
         self.assertTrue(0.0 <= recall <= 1.0)
         backtest = report["rolling_backtest"]
@@ -541,6 +591,24 @@ class PipelineTests(unittest.TestCase):
         assert isinstance(comparison, list)
         self.assertEqual(len(comparison), 2)
         self.assertLess(comparison[1]["calibration_end"], backtest[-1]["test_end"])
+        operating_points = report["train_only_threshold_operating_points"]
+        self.assertIsInstance(operating_points, list)
+        assert isinstance(operating_points, list)
+        self.assertEqual(
+            [item["expected_normal_fraction"] for item in operating_points],
+            [0.90, 0.94, 0.97, 0.99],
+        )
+        self.assertEqual(
+            [item["threshold"] for item in operating_points],
+            sorted(item["threshold"] for item in operating_points),
+        )
+        self.assertEqual(
+            [item["predicted_positives"] for item in operating_points],
+            sorted(
+                (item["predicted_positives"] for item in operating_points),
+                reverse=True,
+            ),
+        )
         diagnostics = report["account_age_segment_diagnostics"]
         self.assertIsInstance(diagnostics, list)
         assert isinstance(diagnostics, list)
