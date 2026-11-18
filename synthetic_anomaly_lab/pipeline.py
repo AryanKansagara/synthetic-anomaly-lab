@@ -131,6 +131,32 @@ class Evaluation:
         denominator = self.precision + self.recall
         return 2 * self.precision * self.recall / denominator if denominator else 0.0
 
+    @property
+    def support(self) -> int:
+        return (
+            self.true_positives
+            + self.false_positives
+            + self.false_negatives
+            + self.true_negatives
+        )
+
+    @property
+    def positive_labels(self) -> int:
+        return self.true_positives + self.false_negatives
+
+    @property
+    def predicted_positives(self) -> int:
+        return self.true_positives + self.false_positives
+
+    @property
+    def predicted_positive_rate(self) -> float:
+        return self.predicted_positives / self.support if self.support else 0.0
+
+    @property
+    def false_positive_rate(self) -> float:
+        normal_labels = self.false_positives + self.true_negatives
+        return self.false_positives / normal_labels if normal_labels else 0.0
+
 
 @dataclass(frozen=True, slots=True)
 class FeatureDrift:
@@ -478,7 +504,7 @@ def threshold_operating_points(
             ThresholdOperatingPoint(
                 expected_normal_fraction=fraction,
                 threshold=threshold,
-                predicted_positives=metrics.true_positives + metrics.false_positives,
+                predicted_positives=metrics.predicted_positives,
                 evaluation=metrics,
             )
         )
@@ -1043,7 +1069,16 @@ def run(count: int, seed: int) -> dict[str, object]:
             {
                 "expected_normal_fraction": point.expected_normal_fraction,
                 "threshold": round(point.threshold, 6),
+                "future_events": point.evaluation.support,
+                "positive_labels": point.evaluation.positive_labels,
                 "predicted_positives": point.predicted_positives,
+                "predicted_positive_rate": round(
+                    point.evaluation.predicted_positive_rate, 6
+                ),
+                "false_positives": point.evaluation.false_positives,
+                "false_positive_rate": round(
+                    point.evaluation.false_positive_rate, 6
+                ),
                 "precision": round(point.evaluation.precision, 6),
                 "recall": round(point.evaluation.recall, 6),
                 "f1": round(point.evaluation.f1, 6),
@@ -1139,6 +1174,7 @@ def run(count: int, seed: int) -> dict[str, object]:
             "scores require human and domain validation before any operational use",
             "historical-label threshold selection optimizes synthetic F1, not real-world cost",
             "train-only threshold operating points are diagnostics, not a selection or capacity recommendation",
+            "operating-point alert and false-positive rates describe one synthetic future window, not review demand",
             "account-age cohorts are descriptive diagnostics, not fairness or policy evidence",
             "scaling comparisons use synthetic labels and do not establish production robustness",
             "score contributions are mathematical decompositions, not causal explanations",
