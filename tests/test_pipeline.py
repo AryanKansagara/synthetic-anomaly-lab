@@ -6,6 +6,7 @@ from synthetic_anomaly_lab.pipeline import (
     AnomalyModel,
     DriftWindow,
     Event,
+    Evaluation,
     FeatureDrift,
     FeatureDriftWindow,
     account_age_segment_diagnostics,
@@ -27,6 +28,18 @@ from synthetic_anomaly_lab.pipeline import (
 
 
 class PipelineTests(unittest.TestCase):
+    def test_evaluation_volume_rates_are_exact_and_zero_safe(self) -> None:
+        metrics = Evaluation(3, 2, 1, 14)
+        self.assertEqual(metrics.support, 20)
+        self.assertEqual(metrics.positive_labels, 4)
+        self.assertEqual(metrics.predicted_positives, 5)
+        self.assertEqual(metrics.predicted_positive_rate, 0.25)
+        self.assertEqual(metrics.false_positive_rate, 0.125)
+
+        empty = Evaluation(0, 0, 0, 0)
+        self.assertEqual(empty.predicted_positive_rate, 0.0)
+        self.assertEqual(empty.false_positive_rate, 0.0)
+
     def test_generator_is_deterministic_and_synthetic(self) -> None:
         self.assertEqual(generate_events(100, seed=11), generate_events(100, seed=11))
         self.assertNotEqual(generate_events(100, seed=11), generate_events(100, seed=12))
@@ -175,6 +188,22 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(
             [point.predicted_positives for point in points],
             [point.predicted_positives for point in relabeled_points],
+        )
+        self.assertEqual(
+            [point.evaluation.predicted_positive_rate for point in points],
+            [point.evaluation.predicted_positive_rate for point in relabeled_points],
+        )
+        self.assertTrue(all(point.evaluation.support == len(future) for point in points))
+        self.assertTrue(
+            all(
+                point.evaluation.positive_labels
+                == sum(event.is_anomaly for event in future)
+                for point in points
+            )
+        )
+        self.assertNotEqual(
+            [point.evaluation.false_positive_rate for point in points],
+            [point.evaluation.false_positive_rate for point in relabeled_points],
         )
         self.assertNotEqual(
             [point.evaluation for point in points],
@@ -564,7 +593,7 @@ class PipelineTests(unittest.TestCase):
         assert isinstance(limitations, list)
         assert isinstance(precision, float)
         assert isinstance(recall, float)
-        self.assertEqual(len(limitations), 11)
+        self.assertEqual(len(limitations), 12)
         self.assertTrue(0.0 <= precision <= 1.0)
         self.assertTrue(0.0 <= recall <= 1.0)
         backtest = report["rolling_backtest"]
@@ -606,6 +635,27 @@ class PipelineTests(unittest.TestCase):
             [item["predicted_positives"] for item in operating_points],
             sorted(
                 (item["predicted_positives"] for item in operating_points),
+                reverse=True,
+            ),
+        )
+        self.assertTrue(all(item["future_events"] == 150 for item in operating_points))
+        self.assertTrue(
+            all(
+                item["positive_labels"] == operating_points[0]["positive_labels"]
+                for item in operating_points
+            )
+        )
+        self.assertTrue(
+            all(
+                0.0 <= item["predicted_positive_rate"] <= 1.0
+                and 0.0 <= item["false_positive_rate"] <= 1.0
+                for item in operating_points
+            )
+        )
+        self.assertEqual(
+            [item["predicted_positive_rate"] for item in operating_points],
+            sorted(
+                (item["predicted_positive_rate"] for item in operating_points),
                 reverse=True,
             ),
         )
