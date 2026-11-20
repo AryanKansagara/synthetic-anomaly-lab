@@ -19,6 +19,7 @@ from synthetic_anomaly_lab.pipeline import (
     population_stability_index,
     rolling_backtest,
     run,
+    score_drift_diagnostic,
     simulate_drift_policy,
     simulate_feature_drift_policy,
     summarize_feature_drift_policy,
@@ -267,6 +268,38 @@ class PipelineTests(unittest.TestCase):
             feature_drift_diagnostics(events[:10], [])
         with self.assertRaisesRegex(ValueError, "non-negative"):
             feature_drift_diagnostics(events[:10], [Event(1, 1, 1, -1, False)])
+
+    def test_score_drift_uses_one_fixed_past_model_and_baseline_buckets(self) -> None:
+        baseline, current = chronological_split(generate_events(500, seed=19))
+        model = fit(baseline)
+        diagnostic = score_drift_diagnostic(model, baseline, current)
+        shifted_current = [
+            dataclasses.replace(event, amount_minor=event.amount_minor * 1_000)
+            for event in current
+        ]
+        shifted = score_drift_diagnostic(model, baseline, shifted_current)
+
+        self.assertEqual(diagnostic.feature, "anomaly_score")
+        self.assertEqual(diagnostic.baseline_support, len(baseline))
+        self.assertEqual(diagnostic.current_support, len(current))
+        self.assertEqual(diagnostic.requested_bins, 10)
+        self.assertGreaterEqual(diagnostic.effective_bins, 2)
+        self.assertGreater(shifted.psi, diagnostic.psi)
+        self.assertEqual(model, fit(baseline))
+
+    def test_score_drift_validates_support_and_scores(self) -> None:
+        events = generate_events(20)
+        model = fit(events[:10])
+        with self.assertRaisesRegex(ValueError, "fill every bin"):
+            score_drift_diagnostic(model, events[:9], events[9:])
+        with self.assertRaisesRegex(ValueError, "cannot be empty"):
+            score_drift_diagnostic(model, events[:10], [])
+        with self.assertRaisesRegex(ValueError, "positive and finite"):
+            score_drift_diagnostic(
+                AnomalyModel(model.centers, (1.0, math.inf, 1.0), model.threshold),
+                events[:10],
+                events[10:],
+            )
 
     def test_feature_drift_exposes_collapsed_quantile_buckets(self) -> None:
         baseline = [Event(index, 100, 30, 2, False) for index in range(20)]
@@ -593,9 +626,15 @@ class PipelineTests(unittest.TestCase):
         assert isinstance(limitations, list)
         assert isinstance(precision, float)
         assert isinstance(recall, float)
-        self.assertEqual(len(limitations), 12)
+        self.assertEqual(len(limitations), 13)
         self.assertTrue(0.0 <= precision <= 1.0)
         self.assertTrue(0.0 <= recall <= 1.0)
+        score_drift = report["score_drift"]
+        self.assertIsInstance(score_drift, dict)
+        assert isinstance(score_drift, dict)
+        self.assertEqual(score_drift["feature"], "anomaly_score")
+        self.assertEqual(score_drift["baseline_support"], 350)
+        self.assertEqual(score_drift["current_support"], 150)
         backtest = report["rolling_backtest"]
         self.assertIsInstance(backtest, list)
         assert isinstance(backtest, list)

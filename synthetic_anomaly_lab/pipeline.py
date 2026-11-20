@@ -186,6 +186,7 @@ class BacktestFold:
     evaluation: Evaluation
     amount_psi: float
     feature_drift: tuple[FeatureDrift, ...]
+    score_drift: FeatureDrift
 
 
 @dataclass(frozen=True, slots=True)
@@ -628,6 +629,36 @@ def feature_drift_diagnostics(
     return tuple(diagnostics)
 
 
+def score_drift_diagnostic(
+    model: AnomalyModel,
+    baseline: Sequence[Event],
+    current: Sequence[Event],
+    *,
+    bins: int = 10,
+) -> FeatureDrift:
+    """Measure drift in a fixed model's score distribution.
+
+    The supplied model is applied unchanged to both samples, and quantile buckets
+    are fitted only on baseline scores. This detects output-distribution change; it
+    does not identify a cause, measure accuracy, or determine model safety.
+    """
+    baseline_scores = [model.score(event) for event in baseline]
+    current_scores = [model.score(event) for event in current]
+    psi, effective_bins, unique_values = _population_stability_details(
+        baseline_scores, current_scores, bins=bins
+    )
+    return FeatureDrift(
+        feature="anomaly_score",
+        psi=psi,
+        baseline_support=len(baseline_scores),
+        current_support=len(current_scores),
+        requested_bins=bins,
+        effective_bins=effective_bins,
+        baseline_unique_values=unique_values,
+        degenerate_baseline=effective_bins < bins,
+    )
+
+
 def simulate_drift_policy(
     windows: Iterable[DriftWindow],
     *,
@@ -897,6 +928,7 @@ def rolling_backtest(
         test = ordered[test_start_index:test_end_index]
         model = fit(train)
         feature_drift = feature_drift_diagnostics(train, test)
+        score_drift = score_drift_diagnostic(model, train, test)
         results.append(
             BacktestFold(
                 train_start=train[0].occurred_at,
@@ -909,6 +941,7 @@ def rolling_backtest(
                 evaluation=evaluate(model, test),
                 amount_psi=feature_drift[0].psi,
                 feature_drift=feature_drift,
+                score_drift=score_drift,
             )
         )
         test_start_index = test_end_index
@@ -972,6 +1005,7 @@ def run(count: int, seed: int) -> dict[str, object]:
     historical_metrics = evaluate(historical_selection.model, test)
     operating_points = threshold_operating_points(train, test)
     feature_drift = feature_drift_diagnostics(train, test)
+    score_drift = score_drift_diagnostic(model, train, test)
     amount_psi = feature_drift[0].psi
     backtest = rolling_backtest(events)
     temporal_summary = summarize_temporal_evaluation(backtest)
@@ -1010,6 +1044,16 @@ def run(count: int, seed: int) -> dict[str, object]:
             }
             for diagnostic in feature_drift
         ],
+        "score_drift": {
+            "feature": score_drift.feature,
+            "psi": round(score_drift.psi, 6),
+            "baseline_support": score_drift.baseline_support,
+            "current_support": score_drift.current_support,
+            "requested_bins": score_drift.requested_bins,
+            "effective_bins": score_drift.effective_bins,
+            "baseline_unique_values": score_drift.baseline_unique_values,
+            "degenerate_baseline": score_drift.degenerate_baseline,
+        },
         "highest_score_explanation": {
             "occurred_at": example_event.occurred_at,
             "score": round(example_explanation.score, 6),
@@ -1124,6 +1168,16 @@ def run(count: int, seed: int) -> dict[str, object]:
                     }
                     for diagnostic in fold.feature_drift
                 ],
+                "score_drift": {
+                    "feature": fold.score_drift.feature,
+                    "psi": round(fold.score_drift.psi, 6),
+                    "baseline_support": fold.score_drift.baseline_support,
+                    "current_support": fold.score_drift.current_support,
+                    "requested_bins": fold.score_drift.requested_bins,
+                    "effective_bins": fold.score_drift.effective_bins,
+                    "baseline_unique_values": fold.score_drift.baseline_unique_values,
+                    "degenerate_baseline": fold.score_drift.degenerate_baseline,
+                },
             }
             for fold in backtest
         ],
@@ -1178,6 +1232,7 @@ def run(count: int, seed: int) -> dict[str, object]:
             "account-age cohorts are descriptive diagnostics, not fairness or policy evidence",
             "scaling comparisons use synthetic labels and do not establish production robustness",
             "score contributions are mathematical decompositions, not causal explanations",
+            "score PSI is an output-distribution diagnostic, not an accuracy or safety decision",
             "drift policy output is a simulation for human review and executes no actions",
             "per-feature PSI policy excludes degenerate or under-supported diagnostics and executes no actions",
             "temporal metric summaries describe four synthetic folds, not confidence intervals or production stability",
